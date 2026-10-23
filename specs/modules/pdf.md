@@ -176,10 +176,10 @@ other tools are not checked.
 
 An indirect `/AcroForm`, `/Fields` or `/Annots` is written inline in the
 rewritten catalog or page, so the update never rewrites objects other than
-the catalog and the first page. pyHanko's difference analysis accepts this
-(modification level `FORM_FILLING` for earlier signatures, `forms` fixture)
-and `pdfsig` validates the result; other validators, such as Adobe Acrobat,
-were not tested.
+the catalog and the first page. The Bend verifier's update analysis
+([verify.md](verify.md)) accepts this for the `forms` fixture, `pdfsig`
+validates the result, and pyHanko's difference analysis classified it as
+`FORM_FILLING` during development; Adobe Acrobat was not tested.
 
 Layout of the update appended to the original bytes:
 

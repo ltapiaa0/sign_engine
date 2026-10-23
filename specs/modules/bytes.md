@@ -24,6 +24,7 @@ lengths are `u24`. `Bytes/NONE` (`0xFFFFFF`) means "not found".
 | `Bytes/pad_left(xs, n, b)` / `Bytes/pad_right(xs, n, b)` | Pads with `b` up to length `n`; longer inputs are returned unchanged. |
 | `Bytes/strip_zeros(xs)` | Removes leading `0` elements. |
 | `Bytes/split(xs, n) -> (front, back)` | `take` and `drop` in one pass (rule P-14). |
+| `Bytes/measure(xs) -> (n, xs)` | Length and the same list, rebuilt in one pass, for lists that are needed after their length is known (HTTP bodies, PDF objects). |
 | `Bytes/pop(xs) -> (head, tail)` | First element (`0` when empty) and the rest. |
 | `Bytes/strip_prefix(xs, prefix) -> (ok, rest)` | `(1, xs without prefix)` when `xs` starts with `prefix`, otherwise `(0, xs)` rebuilt without copying. |
 
@@ -85,7 +86,8 @@ earlier window-based search).
 |---|---|
 | `Bytes/to_base64(xs)` | Standard alphabet with `=` padding. |
 | `Bytes/from_base64(xs)` | Accepts the standard and URL-safe alphabets, ignores characters outside the alphabet (line breaks, spaces) and stops at the first `=`. |
-| `Bytes/b64_char(n)`, `Bytes/b64_value(c)` | Alphabet helpers; `b64_value` returns `0xFE` for `=` and `0xFF` for other characters. |
+| `Bytes/from_base64_strict(xs) -> (ok, n, bytes)` | Decodes and validates in one pass: only the standard alphabet, length a multiple of 4, `=` only as the last one or two characters. `n` is the number of bytes decoded; `ok = 0` for any other input. |
+| `Bytes/b64_char(n)`, `Bytes/b64_value(c)`, `Bytes/b64_std(c)` | Alphabet helpers; `b64_value` returns `0xFE` for `=` and `0xFF` for other characters; `b64_std` is 1 for characters of the standard alphabet. |
 
 `Bytes/from_base64.go(xs, acc, n)` keeps `n < 8` pending bits in `acc`; every
 6-bit symbol is appended and a byte is emitted when 8 or more bits are
@@ -100,5 +102,6 @@ available.
 
 ## Tests
 
-`hex`, `hex_decode`, `base64_enc_*`, `base64_dec_*`, `find`, `rfind`,
-`find_none`, `decimal`, `parse_u24`, `from_io`, `sort` in `test.bend`.
+`hex`, `hex_decode`, `base64_enc_*`, `base64_dec_*`, `base64_strict`,
+`base64_strict_invalid`, `find`, `rfind`, `find_none`, `measure`, `decimal`,
+`parse_u24`, `from_io`, `sort` in `test.bend`.

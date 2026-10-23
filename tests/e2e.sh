@@ -3,14 +3,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="${SIGN_BIN:-$ROOT/build/sign}"
 KEY_BITS="${KEY_BITS:-1024}"
-[ -x "$BIN" ] || "$ROOT/scripts/build.sh"
+[ -x "$BIN" ] || "$ROOT/scripts/build.sh" > /dev/null
+[ -x "$ROOT/build/verify" ] || "$ROOT/scripts/build.sh" verify.bend > /dev/null
+[ -x "$ROOT/build/mkpdf" ] || "$ROOT/scripts/build.sh" mkpdf.bend > /dev/null
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 openssl req -x509 -newkey "rsa:$KEY_BITS" -nodes -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
   -days 30 -subj "/C=CL/O=sign_engine/CN=E2E Test $KEY_BITS" 2>/dev/null
-TRUST=()
-[ "$KEY_BITS" -ge 2048 ] || TRUST=(--no-trust)
 
 fail=0
 sign() {
@@ -29,12 +29,10 @@ sign() {
   fi
 }
 check() {
-  local extra=()
-  case "$2" in hybrid*) extra=(--allow-hybrid) ;; esac
-  if python3 "$ROOT/tests/validate.py" "$1" "$WORK/cert.pem" "${TRUST[@]}" "${extra[@]}" > "$WORK/val.log" 2>&1; then
+  if "$ROOT/tests/validate.sh" "$1" "$WORK/cert.pem" > "$WORK/val.log" 2>&1; then
     echo "PASS  $2"
   else
-    echo "FAIL  $2"; sed 's/^/      /' "$WORK/val.log" | grep -v Traceback | tail -15; fail=1
+    echo "FAIL  $2"; sed 's/^/      /' "$WORK/val.log" | tail -15; fail=1
   fi
 }
 expect_error() {
@@ -71,38 +69,22 @@ else
   echo "FAIL  classic: could not sign a third time"; fail=1
 fi
 
-python3 "$ROOT/tests/certify.py" "$ROOT/tests/fixtures/classic.pdf" "$WORK/certified-p2.pdf" \
-  "$WORK/key.pem" "$WORK/cert.pem" FILL_FORMS
-if sign "$WORK/certified-p2.pdf" "$WORK/certified-p2-signed.pdf" "Approval of a certified document"; then
+if sign "$ROOT/tests/fixtures/certified/p2.pdf" "$WORK/certified-p2-signed.pdf" "Approval of a certified document"; then
   check "$WORK/certified-p2-signed.pdf" "certified document (DocMDP P=2) + approval signature"
 else
   echo "FAIL  certified document (P=2): could not sign ($(cat "$WORK/last_error.txt"))"; fail=1
 fi
-python3 "$ROOT/tests/certify.py" "$ROOT/tests/fixtures/classic.pdf" "$WORK/certified-p1.pdf" \
-  "$WORK/key.pem" "$WORK/cert.pem" NO_CHANGES
-expect_error "$WORK/certified-p1.pdf" "certified document (DocMDP P=1)" "does not allow changes"
+expect_error "$ROOT/tests/fixtures/certified/p1.pdf" "certified document (DocMDP P=1)" "does not allow changes"
 
 cat "$WORK/cert.pem" "$WORK/key.pem" > "$WORK/bundle.pem"
 CERT_FILE="$WORK/bundle.pem" expect_error "$ROOT/tests/fixtures/classic.pdf" "certificate file containing a private key" "must not contain a private key"
 
 if [ "${LARGE:-0}" = "1" ]; then
-  python3 - "$WORK/large.pdf" "${LARGE_PAGES:-60}" <<'PY'
-import random, sys
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-random.seed(3)
-c = canvas.Canvas(sys.argv[1], pagesize=A4, invariant=1, pageCompression=0)
-words = "contract party clause signature agreement payment term obligation liability notice".split()
-for _ in range(int(sys.argv[2])):
-    y = 800
-    for _ in range(70):
-        c.drawString(40, y, " ".join(random.choice(words) for _ in range(14)))
-        y -= 11
-    c.showPage()
-c.save()
-PY
-  if sign "$WORK/large.pdf" "$WORK/large-1.pdf" "Large document"; then
-    check "$WORK/large-1.pdf" "large: one signature ($(stat -c %s "$WORK/large.pdf") bytes)"
+  mkdir -p "$WORK/large"
+  echo "${LARGE_PAGES:-60}" > "$WORK/large/pages.txt"
+  (cd "$WORK/large" && "$ROOT/build/mkpdf" > /dev/null)
+  if sign "$WORK/large/large.pdf" "$WORK/large-1.pdf" "Large document"; then
+    check "$WORK/large-1.pdf" "large: one signature ($(stat -c %s "$WORK/large/large.pdf") bytes)"
   else
     echo "FAIL  large: could not sign ($(cat "$WORK/last_error.txt"))"; fail=1
   fi

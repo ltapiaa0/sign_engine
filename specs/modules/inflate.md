@@ -90,5 +90,5 @@ bytes above them (`upleft`). Paeth uses `pa = |b - c|`, `pb = |a - c|`,
 
 `inflate_fixed`, `inflate_dynamic`, `inflate_stored`, `inflate_truncated`,
 `inflate_garbage`, `png_up`, `png_sub` in `test.bend` (streams produced by
-Python's `zlib`); the `objstm` and `hybrid`
+zlib); the `objstm` and `hybrid`
 fixtures exercise FlateDecode with and without predictors.

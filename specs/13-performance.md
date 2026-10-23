@@ -67,6 +67,21 @@ mostly in `sched_yield` system calls:
 
 The output was identical to the input (`cmp`) in every case.
 
+## Service and tools
+
+| Operation | Interactions | Time |
+|---|---|---|
+| `GET /health` (process start, `server.conf`, head, response) | — | 0.05 s |
+| `GET /api/v1/jobs/<id>` (also reads the job record and `/proc`) | — | 0.11 s |
+| Validate a 644 KB signed PDF with `build/verify` (SHA-256 of the signed ranges, CMS, RSA) | 1 002 M | 78 s |
+| Generate a 750-page, 6.7 MB document with `build/mkpdf` | — | 200 s |
+
+A request reads its head one byte at a time (one I/O call per byte, see
+[02-platform.md](02-platform.md#5-io-programs)), which costs well under a
+millisecond per byte. Signing the 2 KB `classic` fixture through the service
+(`POST /api/v1/sign`, RSA-1024) takes 224 M interactions against 222 M for
+the command line program: HTTP, JSON and base64 add about 1%.
+
 ## Optimization history
 
 | Change | Effect |

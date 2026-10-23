@@ -1,0 +1,11 @@
+[Unit]
+Description=sign_engine HTTP API socket
+
+[Socket]
+ListenStream=127.0.0.1:8080
+Accept=yes
+MaxConnections=4
+MaxConnectionsPerSource=4
+
+[Install]
+WantedBy=sockets.target

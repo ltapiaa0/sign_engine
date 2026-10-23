@@ -69,24 +69,53 @@ surface only under some inputs or thread counts.
 
 ## 5. I/O programs
 
-- **Rule P-12.** Keep `main` thin: read inputs, call one pure function that
-  returns a `Result`, write outputs. Complex pattern matching inside a
-  `with IO:` block produced erased results (`Result: *`) during development.
+- **Rule P-12.** Keep `main` thin: read inputs, call pure functions, write
+  outputs. Decisions belong in pure library functions that return a value
+  the I/O code only has to match on (`Route`, `Outcome` in
+  `lib/service.bend`).
 - **Rule P-13.** Use `* <- IO/...` for effects whose result is unused.
-- **Rule P-22.** Define functions that use `with IO:` in the program file,
-  and inside a `with` block use each imported definition at most once.
+- **Rule P-22.** Inside `with IO:` blocks, call only definitions of the
+  program file and builtins; reach library functions through wrappers
+  defined in the program file (`Main/route` calls `Service/route`).
   Bend 0.2.38 resolves names of the program file and builtins as global
   references, but treats definitions of imported modules as variables
-  captured by the bind continuations. A captured definition used in several
-  later steps is duplicated, and duplicating a reference to a definition that
-  itself duplicates values makes HVM expand it; for a recursive definition
-  the expansion never ends. Moving the file-reading helpers into a library
-  module and calling them four times from `main` made signing a 2 KB
-  document run until the node buffers were full (more than 5 minutes instead
-  of 10 seconds).
+  captured by the bind continuations (also inside the library's own `with`
+  blocks). A captured definition used in several later steps is duplicated,
+  and duplicating a reference to a definition that itself duplicates values
+  makes HVM expand it; for a recursive definition the expansion never ends.
+  Two observed failures: file-reading helpers moved into a library and
+  called four times from `main` made signing a 2 KB document run until the
+  node buffers were full (more than 5 minutes instead of 10 seconds), and a
+  response built inside a `with` block with three calls to
+  `Bytes/from_string` came out truncated after the first part.
+- **Rule P-24.** HVM evaluates every expression whose inputs are known, also
+  inside the continuations of a `with IO:` block; I/O actions only
+  determine the order of the effects. Work that must happen after an effect
+  has to depend on that effect's result: the asynchronous job in
+  `server.bend` signs inside a `match` on the result of closing standard
+  input, otherwise the signature would be computed before the `202`
+  response is sent.
+- Files are the only I/O channel besides standard input and output: the
+  service reads the time from `/proc/stat` and `/proc/uptime`
+  ([modules/clock.md](modules/clock.md)), random bytes from `/dev/urandom`
+  and its configuration from a file. Reading standard input must not request
+  more bytes than the peer has sent (a read blocks until the requested
+  amount or the end of the stream), so the HTTP head is read one byte at a
+  time.
 - `bend run-rs` does not perform I/O; I/O programs run with `bend run-c` or
   as compiled binaries. Compiled binaries take no arguments, hence the fixed
-  file names of the CLI ([10-cli.md](10-cli.md)).
+  file names of the CLI ([10-cli.md](10-cli.md)) and the service's
+  `server.conf`.
+
+## 5b. Syntax notes
+
+- String literals accept `\n`, `\r`, `\t`, `\"` and `\\` but not `\xNN`;
+  write non-ASCII bytes as list literals (`[0xE2, 0xE3, 0xCF, 0xD3]`).
+- A variable assigned in both branches of an `if`/`else` can be used after
+  it, but not one assigned in an `if`/`elif`/`else` chain; compute it in a
+  helper function instead (`Service/conf_error`).
+- List literals may span several lines and end with a comma (`run` in
+  `test.bend`).
 
 ## 6. Every use of a value is a copy
 

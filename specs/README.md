@@ -23,8 +23,14 @@ reader needs to understand the code is documented here.
 | [modules/inflate.md](modules/inflate.md) | `lib/inflate.bend` — DEFLATE, zlib, PNG predictors |
 | [modules/pdf.md](modules/pdf.md) | `lib/pdf.bend` — PDF reading and incremental signature update |
 | [modules/signer.md](modules/signer.md) | `lib/signer.bend` — signing orchestration and parameters |
+| [modules/json.md](modules/json.md) | `lib/json.bend` — JSON parsing and encoding |
+| [modules/http.md](modules/http.md) | `lib/http.bend` — HTTP/1.1 request heads and responses |
+| [modules/clock.md](modules/clock.md) | `lib/clock.bend` — UTC time from `/proc` |
+| [modules/service.md](modules/service.md) | `lib/service.bend` — request handling of the HTTP service |
+| [modules/verify.md](modules/verify.md) | `lib/verify.bend` — signature validation (tests) |
+| [modules/mkpdf.md](modules/mkpdf.md) | `lib/mkpdf.bend` — generator of large test documents |
 | [10-cli.md](10-cli.md) | `sign.bend` command line program |
-| [11-http-service.md](11-http-service.md) | `service/server.py` HTTP API |
+| [11-http-service.md](11-http-service.md) | `server.bend` HTTP API |
 | [12-testing.md](12-testing.md) | Unit tests, fixtures, end-to-end validation |
 | [13-performance.md](13-performance.md) | Cost model, measurements, optimization history |
 

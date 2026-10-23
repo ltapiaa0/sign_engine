@@ -46,4 +46,5 @@ modulo `p` and `q` uses `BigInt/to_mont` without long division.
 
 `emsa_len` in `test.bend`; signatures were checked byte-for-byte against
 `openssl dgst -sha256 -sign` during development; every end-to-end signature is
-self-verified and validated by pyHanko/pdfsig.
+self-verified and validated by `openssl cms -verify`, `pdfsig` and the Bend
+verifier.

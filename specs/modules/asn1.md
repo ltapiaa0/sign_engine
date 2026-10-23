@@ -49,4 +49,5 @@ Callers select blocks by label (see [x509.md](x509.md)); no function returns
 ## Tests
 
 `der_len`, `der_int_pad`, `der_int_zero`, `der_read`, `pem` in `test.bend`;
-CMS output validated by OpenSSL and pyHanko.
+CMS output validated by `openssl cms -verify`, `pdfsig` and the Bend verifier
+in every end-to-end test.

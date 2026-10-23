@@ -1,0 +1,152 @@
+--- a/generated.c
++++ b/generated.c
+@@ -113,17 +113,23 @@
+ 
+ // Constants
+ #define FREE 0x00000000
+-#define ROOT 0xFFFFFFF8
++#define ROOT ((u32)((G_VARS_LEN - 1) << 3))
+ #define NONE 0xFFFFFFFF
+ 
+ // Cache Padding
+ #define CACHE_PAD 64
+ 
+ // Global Net
+-#define HLEN (1ul << 16) // max 16k high-priority redexes
++#define HLEN (1ul << 25)
+ #define RLEN (1ul << 24) // max 16m low-priority redexes
+-#define G_NODE_LEN (1ul << 29) // max 536m nodes
+-#define G_VARS_LEN (1ul << 29) // max 536m vars
++#ifndef G_NODE_L2
++#define G_NODE_L2 28
++#endif
++#ifndef G_VARS_L2
++#define G_VARS_L2 29
++#endif
++#define G_NODE_LEN (1ul << G_NODE_L2)
++#define G_VARS_LEN (1ul << G_VARS_L2)
+ #define G_RBAG_LEN (TPC * RLEN)
+ 
+ typedef struct Net {
+@@ -709,6 +715,21 @@
+   return net;
+ }
+ 
++void hvm_oom() {
++#ifdef HTTP_SERVER
++  fputs("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 35\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n{\"error\": \"runtime: out of memory\"}", stdout);
++  fflush(stdout);
++#else
++  FILE* f = fopen("error.txt", "w");
++  if (f != NULL) {
++    fputs("runtime: out of memory", f);
++    fclose(f);
++  }
++  printf("error: runtime: out of memory\n");
++#endif
++  exit(1);
++}
++
+ // Allocator
+ // ---------
+ 
+@@ -721,20 +742,20 @@
+       return lc;
+     }
+     // FIXME: check this decently
+-    if (++(*lps) >= G_NODE_LEN/TPC) printf("OOM\n");
++    if (++(*lps) >= G_NODE_LEN/TPC) hvm_oom();
+   }
+ }
+ 
+ u32 vars_alloc_1(Net* net, TM* tm, u32* lps) {
+   while (true) {
+-    u32 lc = tm->tid*(G_NODE_LEN/TPC) + (tm->vput%(G_NODE_LEN/TPC));
++    u32 lc = tm->tid*(G_VARS_LEN/TPC) + (tm->vput%(G_VARS_LEN/TPC));
+     Port elem = net->vars_buf[lc];
+     tm->vput += 1;
+     if (lc > 0 && elem == 0) {
+       return lc;
+     }
+     // FIXME: check this decently
+-    if (++(*lps) >= G_NODE_LEN/TPC) printf("OOM\n");
++    if (++(*lps) >= G_VARS_LEN/TPC) hvm_oom();
+   }
+ }
+ 
+@@ -749,7 +770,7 @@
+       tm->nloc[got++] = lc;
+     }
+     // FIXME: check this decently
+-    if (++lps >= G_NODE_LEN/TPC) printf("OOM\n");
++    if (++lps >= G_NODE_LEN/TPC) hvm_oom();
+   }
+   return got;
+ }
+@@ -758,14 +779,14 @@
+   u32 got = 0;
+   u32 lps = 0;
+   while (got < num) {
+-    u32 lc = tm->tid*(G_NODE_LEN/TPC) + (tm->vput%(G_NODE_LEN/TPC));
++    u32 lc = tm->tid*(G_VARS_LEN/TPC) + (tm->vput%(G_VARS_LEN/TPC));
+     Port elem = net->vars_buf[lc];
+     tm->vput += 1;
+     if (lc > 0 && elem == 0) {
+       tm->vloc[got++] = lc;
+     }
+     // FIXME: check this decently
+-    if (++lps >= G_NODE_LEN/TPC) printf("OOM\n");
++    if (++lps >= G_VARS_LEN/TPC) hvm_oom();
+   }
+   return got;
+ }
+@@ -225616,6 +225637,11 @@
+   Port old = vars_load(net, get_val(ROOT));
+   Port got = peek(net, port);
+   while (get_tag(got) == REF) {
++    Def* def = &book->defs_buf[get_val(got) & 0xFFFFFFF];
++    if (def->node_len == 0 && def->rbag_len == 0 && get_tag(def->root) == NUM) {
++      got = def->root;
++      break;
++    }
+     boot_redex(net, new_pair(got, ROOT));
+     normalize(net, book);
+     got = peek(net, vars_load(net, get_val(ROOT)));
+@@ -226152,6 +226178,7 @@
+   normalize(net, book);
+   #endif
+ 
++  #ifndef HTTP_SERVER
+   // Prints the result
+   printf("Result: ");
+   pretty_print_port(net, book, enter(net, ROOT));
+@@ -226165,6 +226192,7 @@
+   printf("- ITRS: %" PRIu64 "\n", itrs);
+   printf("- TIME: %.2fs\n", duration);
+   printf("- MIPS: %.2f\n", (double)itrs / duration / 1000000.0);
++  #endif
+ 
+   // Frees everything
+   free_static_tms();
+@@ -226308,10 +226336,8 @@
+   bytes.buf = (char*) malloc(sizeof(char) * capacity);
+   bytes.len = 0;
+ 
+-  // Readback loop
++  normalize(net, book);
+   while (true) {
+-    // Normalizes the net
+-    normalize(net, book);
+ 
+     // Reads the λ-Encoded Ctr
+     Ctr ctr = readback_ctr(net, book, peek(net, port));
+@@ -226331,8 +226357,7 @@
+         }
+ 
+         bytes.buf[bytes.len++] = get_u24(get_val(ctr.args_buf[0]));
+-        boot_redex(net, new_pair(ctr.args_buf[1], ROOT));
+-        port = ROOT;
++        port = ctr.args_buf[1];
+         continue;
+       }
+     }

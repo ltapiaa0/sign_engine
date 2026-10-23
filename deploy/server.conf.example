@@ -1,0 +1,10 @@
+token=change-me
+key=/etc/sign-engine/key.pem
+cert=/etc/sign-engine/cert.pem
+allowed_hosts=localhost:8080,127.0.0.1:8080,[::1]:8080
+max_pdf=8388608
+sig_size=8192
+client_keys=0
+anonymous=0
+jobs=jobs
+job_timeout=3600

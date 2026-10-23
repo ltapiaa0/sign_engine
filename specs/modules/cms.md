@@ -65,5 +65,6 @@ Every constant is a byte literal (rule P-6): `Cms/ALG_SHA256`
 ## Tests
 
 `cms_attrs_sorted` in `test.bend`; the complete structure was verified with
-`openssl cms -verify` during development and is validated by pyHanko in every
-end-to-end test.
+`openssl cms -verify` during development and is validated by
+`openssl cms -verify`, `pdfsig` and the Bend verifier
+([verify.md](verify.md)) in every end-to-end test.

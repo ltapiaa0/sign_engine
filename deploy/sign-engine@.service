@@ -1,0 +1,19 @@
+[Unit]
+Description=sign_engine HTTP request
+
+[Service]
+ExecStart=/opt/sign_engine/build/server
+WorkingDirectory=/var/lib/sign-engine
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+User=sign-engine
+Group=sign-engine
+RuntimeMaxSec=900
+MemoryMax=5G
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/sign-engine/jobs

@@ -429,6 +429,41 @@ def Bytes/to_base64(xs: List(u24)) -> List(u24):
               n = (a << 16) | (b << 8) | c
               return List/Cons(Bytes/b64_char(n >> 18), List/Cons(Bytes/b64_char((n >> 12) & 63), List/Cons(Bytes/b64_char((n >> 6) & 63), List/Cons(Bytes/b64_char(n & 63), Bytes/to_base64(t2.tail)))))
 
+def Bytes/b64_std(c: u24) -> u24:
+  return ((c >= 65) & (c <= 90)) | ((c >= 97) & (c <= 122)) | ((c >= 48) & (c <= 57)) | (c == 43) | (c == 47)
+
+def Bytes/from_base64_strict(xs: List(u24)) -> (u24, u24, List(u24)):
+  return Bytes/from_base64_strict.go(xs, 0, 0, 0, 0)
+
+def Bytes/from_base64_strict.go(xs: List(u24), acc: u24, n: u24, pos: u24, pad: u24) -> (u24, u24, List(u24)):
+  match xs:
+    case List/Nil:
+      return (pos == 0, 0, [])
+    case List/Cons:
+      c = xs.head
+      if c == 61:
+        if ((pos == 2) & (pad == 0)) | (pos == 3):
+          return Bytes/from_base64_strict.go(xs.tail, acc, n, (pos + 1) & 3, pad + 1)
+        else:
+          return (0, 0, [])
+      elif Bytes/b64_std(c) & (pad == 0):
+        acc2 = ((acc << 6) | Bytes/b64_value(c)) & 0xFFFF
+        if n >= 2:
+          (ok, cnt, rest) = Bytes/from_base64_strict.go(xs.tail, acc2 & ((1 << (n - 2)) - 1), n - 2, (pos + 1) & 3, 0)
+          return (ok, cnt + 1, List/Cons((acc2 >> (n - 2)) & 0xFF, rest))
+        else:
+          return Bytes/from_base64_strict.go(xs.tail, acc2, n + 6, (pos + 1) & 3, 0)
+      else:
+        return (0, 0, [])
+
+def Bytes/measure(xs: List(u24)) -> (u24, List(u24)):
+  match xs:
+    case List/Nil:
+      return (0, [])
+    case List/Cons:
+      (n, rest) = Bytes/measure(xs.tail)
+      return (n + 1, List/Cons(xs.head, rest))
+
 def Bytes/from_base64(xs: List(u24)) -> List(u24):
   return Bytes/from_base64.go(xs, 0, 0)
 
