@@ -1,32 +1,47 @@
-# sign.bend
-# Aplicación de línea de comandos: firma un PDF.
-#
-# Bend no recibe argumentos de línea de comandos, así que el programa
-# trabaja sobre archivos con nombres fijos en el directorio actual:
-#
-#   entrada:  input.pdf, key.pem, cert.pem, params.txt (opcional)
-#   salida:   output.pdf  (o error.txt con el mensaje de error)
-#
-# Uso:  cd <directorio-de-trabajo> && bend run-c /ruta/a/sign.bend
-#       (o el binario compilado con scripts/build.sh)
-
 from lib/bytes import *
 from lib/signer import *
 
-def read_or_empty(r):
-  match r:
-    case Result/Ok:
-      return Bytes/from_io(r.val)
-    case Result/Err:
-      return []
+def Main/CHUNK() -> u24:
+  return 1048576
+
+def Main/reverse(xs, acc):
+  match xs:
+    case List/Nil:
+      return acc
+    case List/Cons:
+      return Main/reverse(xs.tail, List/Cons(xs.head, acc))
+
+def Main/read_chunks(fd: u24, chunks):
+  with IO:
+    res <- IO/FS/read(fd, Main/CHUNK)
+    match res:
+      case Result/Ok:
+        match chunk = res.val:
+          case List/Nil:
+            return wrap(Bytes/from_io(Bytes/join(Main/reverse(chunks, []))))
+          case List/Cons:
+            return Main/read_chunks(fd, List/Cons(chunk, chunks))
+      case Result/Err:
+        return wrap([])
+
+def Main/read_file(path: String):
+  with IO:
+    opened <- IO/FS/open(path, "r")
+    match opened:
+      case Result/Ok:
+        data <- Main/read_chunks(opened.val, [])
+        * <- IO/FS/close(opened.val)
+        return wrap(data)
+      case Result/Err:
+        return wrap([])
 
 def main():
   with IO:
-    pdf <- IO/FS/read_file("input.pdf")
-    key <- IO/FS/read_file("key.pem")
-    cert <- IO/FS/read_file("cert.pem")
-    params <- IO/FS/read_file("params.txt")
-    match res = Signer/sign_pdf(read_or_empty(pdf), read_or_empty(key), read_or_empty(cert), read_or_empty(params)):
+    pdf <- Main/read_file("input.pdf")
+    key <- Main/read_file("key.pem")
+    cert <- Main/read_file("cert.pem")
+    params <- Main/read_file("params.txt")
+    match res = Signer/sign_pdf(pdf, key, cert, params):
       case Result/Ok:
         * <- IO/FS/write_file("output.pdf", res.val)
         * <- IO/print("ok\n")

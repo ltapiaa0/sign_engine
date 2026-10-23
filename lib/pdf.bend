@@ -1,22 +1,7 @@
-# lib/pdf.bend
-# Lectura de la estructura de un PDF (ISO 32000) y escritura de una
-# actualización incremental con un campo de firma.
-#
-# Soporta:
-#   - tablas xref clásicas, xref streams (PDF 1.5+) y archivos híbridos
-#   - object streams comprimidos (/Type /ObjStm) con FlateDecode
-#   - cadenas de actualizaciones previas (/Prev), incluso PDFs ya firmados
-# No soporta: PDFs cifrados, archivos de más de 16 MiB (límite de u24).
-
 from lib/bytes import *
+from lib/text import *
 from lib/inflate import *
 
-# ---------------------------------------------------------------------------
-# Modelo de objetos
-# ---------------------------------------------------------------------------
-
-# Los números, cadenas y palabras clave se conservan como texto original
-# (Raw) para reescribirlos exactamente igual.
 type PdfObj:
   Raw { raw: List(u24) }
   Name { name: List(u24) }
@@ -24,8 +9,6 @@ type PdfObj:
   Dict { entries: List((List(u24), PdfObj)) }
   Ref { num: u24, gen: u24 }
 
-# Literal puro ("null" en ASCII): las constantes globales que se duplican
-# no deben contener llamadas, o HVM no puede clonarlas.
 def Pdf/null() -> PdfObj:
   return PdfObj/Raw([110, 117, 108, 108])
 
@@ -39,15 +22,12 @@ def Pdf/is_null(o: PdfObj) -> u24:
 def Pdf/num(n: u24) -> PdfObj:
   return PdfObj/Raw(Bytes/from_u24(n))
 
-# Número literal para constantes: `Pdf/num(3)` sería una expresión cerrada
-# con llamadas a funciones, que HVM no puede duplicar de forma segura.
 def Pdf/lit(s: String) -> PdfObj:
   return PdfObj/Raw(Bytes/from_string(s))
 
 def Pdf/name(s: String) -> PdfObj:
   return PdfObj/Name(Bytes/from_string(s))
 
-# Valor entero de un objeto numérico (0 si no lo es).
 def Pdf/int(o: PdfObj) -> u24:
   match o:
     case PdfObj/Raw:
@@ -77,7 +57,6 @@ def Pdf/is_dict(o: PdfObj) -> u24:
     case _:
       return 0
 
-# Busca una clave en un diccionario (null si no existe).
 def Pdf/get(o: PdfObj, key: String) -> PdfObj:
   return Pdf/get.go(Pdf/entries(o), Bytes/from_string(key))
 
@@ -95,7 +74,6 @@ def Pdf/get.go(es: List((List(u24), PdfObj)), key: List(u24)) -> PdfObj:
 def Pdf/has(o: PdfObj, key: String) -> u24:
   return Pdf/is_null(Pdf/get(o, key)) == 0
 
-# Asigna una clave (reemplaza si existe, agrega al final si no).
 def Pdf/set(o: PdfObj, key: String, value: PdfObj) -> PdfObj:
   return PdfObj/Dict(Pdf/set.go(Pdf/entries(o), Bytes/from_string(key), value))
 
@@ -117,17 +95,12 @@ def Pdf/name_is(o: PdfObj, s: String) -> u24:
     case _:
       return 0
 
-# ---------------------------------------------------------------------------
-# Léxico
-# ---------------------------------------------------------------------------
-
 def Pdf/is_delim(c: u24) -> u24:
   return (c == '(') | (c == ')') | (c == '<') | (c == '>') | (c == '[') | (c == ']') | (c == '{') | (c == '}') | (c == '/') | (c == '%')
 
 def Pdf/is_regular(c: u24) -> u24:
   return (Bytes/is_space(c) == 0) & (Pdf/is_delim(c) == 0)
 
-# Salta espacios y comentarios.
 def Pdf/skip(xs: List(u24)) -> List(u24):
   match xs:
     case List/Nil:
@@ -150,7 +123,6 @@ def Pdf/skip_line(xs: List(u24)) -> List(u24):
       else:
         return Pdf/skip_line(xs.tail)
 
-# Toma caracteres regulares: (token, resto).
 def Pdf/token(xs: List(u24)) -> (List(u24), List(u24)):
   match xs:
     case List/Nil:
@@ -186,74 +158,88 @@ def Pdf/head(xs: List(u24)) -> u24:
     case List/Cons:
       return xs.head
 
-# ---------------------------------------------------------------------------
-# Parser de objetos
-# ---------------------------------------------------------------------------
-
-# Lee un objeto PDF. Retorna (objeto, resto).
 def Pdf/parse(input: List(u24)) -> (PdfObj, List(u24)):
-  xs = Pdf/skip(input)
-  match xs:
+  match xs = Pdf/skip(input):
     case List/Nil:
       return (Pdf/null, [])
     case List/Cons:
       c = xs.head
       if c == '<':
-        if Pdf/head(xs.tail) == '<':
-          return Pdf/parse_dict(Bytes/drop(xs, 2), [])
-        else:
-          return Pdf/hex_string(xs.tail, ['<'])
+        match t = xs.tail:
+          case List/Nil:
+            return (PdfObj/Raw([c]), [])
+          case List/Cons:
+            if t.head == '<':
+              return Pdf/parse_dict(t.tail, [])
+            else:
+              return Pdf/hex_string(List/Cons(t.head, t.tail), [c])
       elif c == '(':
-        return Pdf/lit_string(xs.tail, 1, ['('])
+        return Pdf/lit_string(xs.tail, 1, [c])
       elif c == '[':
         return Pdf/parse_array(xs.tail, [])
       elif c == '/':
         (name, rest) = Pdf/token(xs.tail)
         return (PdfObj/Name(name), rest)
       else:
-        (tok, rest) = Pdf/token(xs)
+        (tok, rest) = Pdf/token(List/Cons(c, xs.tail))
         match tok:
           case List/Nil:
-            # Delimitador inesperado: se consume para no ciclar.
-            return (PdfObj/Raw([c]), xs.tail)
+            return (PdfObj/Raw([c]), Bytes/drop(rest, 1))
           case List/Cons:
             if Pdf/is_int_token(tok):
               return Pdf/maybe_ref(tok, rest)
             else:
               return (PdfObj/Raw(tok), rest)
 
-# "n g R" -> referencia; si no, sólo el número.
+def Pdf/unread(tok: List(u24), rest: List(u24)) -> List(u24):
+  return List/Cons(32, Bytes/concat(tok, List/Cons(32, rest)))
+
+def Pdf/ref(num: List(u24), gen: List(u24)) -> PdfObj:
+  (n, *, *) = Bytes/parse_u24(num)
+  (g, *, *) = Bytes/parse_u24(gen)
+  return PdfObj/Ref(n, g)
+
 def Pdf/maybe_ref(tok: List(u24), rest: List(u24)) -> (PdfObj, List(u24)):
   (tok2, rest2) = Pdf/token(Pdf/skip(rest))
   if Pdf/is_int_token(tok2):
-    r = Pdf/skip(rest2)
-    match r:
+    match r = Pdf/skip(rest2):
       case List/Nil:
-        return (PdfObj/Raw(tok), rest)
+        return (PdfObj/Raw(tok), Pdf/unread(tok2, []))
       case List/Cons:
-        if (r.head == 'R') & (Pdf/is_regular(Pdf/head(r.tail)) == 0):
-          (n, *, *) = Bytes/parse_u24(tok)
-          (g, *, *) = Bytes/parse_u24(tok2)
-          return (PdfObj/Ref(n, g), r.tail)
+        if r.head == 'R':
+          match t = r.tail:
+            case List/Nil:
+              return (Pdf/ref(tok, tok2), [])
+            case List/Cons:
+              if Pdf/is_regular(t.head):
+                return (PdfObj/Raw(tok), Pdf/unread(tok2, List/Cons('R', List/Cons(t.head, t.tail))))
+              else:
+                return (Pdf/ref(tok, tok2), List/Cons(t.head, t.tail))
         else:
-          return (PdfObj/Raw(tok), rest)
+          return (PdfObj/Raw(tok), Pdf/unread(tok2, List/Cons(r.head, r.tail)))
   else:
-    return (PdfObj/Raw(tok), rest)
+    return (PdfObj/Raw(tok), Pdf/unread(tok2, rest2))
 
 def Pdf/parse_dict(xs: List(u24), acc: List((List(u24), PdfObj))) -> (PdfObj, List(u24)):
-  s = Pdf/skip(xs)
-  match s:
+  match s = Pdf/skip(xs):
     case List/Nil:
       return (PdfObj/Dict(Pdf/rev_entries(acc, [])), [])
     case List/Cons:
-      if (s.head == '>') & (Pdf/head(s.tail) == '>'):
-        return (PdfObj/Dict(Pdf/rev_entries(acc, [])), Bytes/drop(s, 2))
+      if s.head == '>':
+        match t = s.tail:
+          case List/Nil:
+            return (PdfObj/Dict(Pdf/rev_entries(acc, [])), [])
+          case List/Cons:
+            if t.head == '>':
+              return (PdfObj/Dict(Pdf/rev_entries(acc, [])), t.tail)
+            else:
+              return Pdf/parse_dict(List/Cons(t.head, t.tail), acc)
       elif s.head == '/':
         (key, r1) = Pdf/token(s.tail)
         (val, r2) = Pdf/parse(r1)
         return Pdf/parse_dict(r2, List/Cons((key, val), acc))
       else:
-        (*, r1) = Pdf/parse(s)
+        (*, r1) = Pdf/parse(List/Cons(s.head, s.tail))
         return Pdf/parse_dict(r1, acc)
 
 def Pdf/rev_entries(xs: List((List(u24), PdfObj)), acc: List((List(u24), PdfObj))) -> List((List(u24), PdfObj)):
@@ -282,7 +268,6 @@ def Pdf/rev_objs(xs: List(PdfObj), acc: List(PdfObj)) -> List(PdfObj):
     case List/Cons:
       return Pdf/rev_objs(xs.tail, List/Cons(xs.head, acc))
 
-# Cadena hexadecimal <...>; acc invertido.
 def Pdf/hex_string(xs: List(u24), acc: List(u24)) -> (PdfObj, List(u24)):
   match xs:
     case List/Nil:
@@ -293,7 +278,6 @@ def Pdf/hex_string(xs: List(u24), acc: List(u24)) -> (PdfObj, List(u24)):
       else:
         return Pdf/hex_string(xs.tail, List/Cons(xs.head, acc))
 
-# Cadena literal (...) con paréntesis anidados y escapes; acc invertido.
 def Pdf/lit_string(xs: List(u24), depth: u24, acc: List(u24)) -> (PdfObj, List(u24)):
   match xs:
     case List/Nil:
@@ -315,10 +299,6 @@ def Pdf/lit_string(xs: List(u24), depth: u24, acc: List(u24)) -> (PdfObj, List(u
           return Pdf/lit_string(xs.tail, depth - 1, List/Cons(c, acc))
       else:
         return Pdf/lit_string(xs.tail, depth, List/Cons(c, acc))
-
-# ---------------------------------------------------------------------------
-# Serialización
-# ---------------------------------------------------------------------------
 
 def Pdf/serialize(o: PdfObj) -> List(u24):
   match o:
@@ -352,30 +332,24 @@ def Pdf/serialize_entries(es: List((List(u24), PdfObj))) -> List(u24):
       (k, v) = es.head
       return List/Cons('/', Bytes/concat(k, List/Cons(' ', Bytes/concat(Pdf/serialize(v), List/Cons(' ', Pdf/serialize_entries(es.tail))))))
 
-# ---------------------------------------------------------------------------
-# Lectura de objetos indirectos
-# ---------------------------------------------------------------------------
-
-# Lee "n g obj <objeto> [stream ... endstream]" en `xs`.
-# Retorna (objeto, datos_del_stream).
-def Pdf/read_indirect(xs: List(u24)) -> (PdfObj, List(u24)):
-  (*, r1) = Pdf/token(Pdf/skip(xs))
+def Pdf/read_indirect(xs: List(u24)) -> (u24, PdfObj, List(u24)):
+  (t1, r1) = Pdf/token(Pdf/skip(xs))
   (*, r2) = Pdf/token(Pdf/skip(r1))
   (*, r3) = Pdf/token(Pdf/skip(r2))
+  (num, *, *) = Bytes/parse_u24(t1)
   (obj, r4) = Pdf/parse(r3)
-  r5 = Pdf/skip(r4)
-  if Bytes/starts_with(r5, Bytes/from_string("stream")):
-    data = Pdf/stream_start(Bytes/drop(r5, 6))
+  (is_stream, r5) = Bytes/strip_prefix(Pdf/skip(r4), Bytes/from_string("stream"))
+  if is_stream:
+    data = Pdf/stream_start(r5)
     len_obj = Pdf/get(obj, "Length")
     match len_obj:
       case PdfObj/Raw:
-        return (obj, Bytes/take(data, Pdf/int(len_obj)))
+        return (num, obj, Bytes/take(data, Pdf/int(len_obj)))
       case _:
-        return (obj, Pdf/until_endstream(data))
+        return (num, obj, Pdf/until_endstream(data))
   else:
-    return (obj, [])
+    return (num, obj, [])
 
-# Tras la palabra "stream" viene CRLF o LF.
 def Pdf/stream_start(xs: List(u24)) -> List(u24):
   match xs:
     case List/Nil:
@@ -410,7 +384,6 @@ def Pdf/strip_eol(xs: List(u24)) -> List(u24):
       else:
         return xs
 
-# Decodifica un stream (sólo FlateDecode, opcionalmente con predictor PNG).
 def Pdf/decode_stream(dict: PdfObj, data: List(u24)) -> List(u24):
   if Pdf/is_flate(Pdf/get(dict, "Filter")):
     raw = Inflate/zlib(data)
@@ -426,7 +399,6 @@ def Pdf/decode_stream(dict: PdfObj, data: List(u24)) -> List(u24):
   else:
     return data
 
-# 1 si el filtro (nombre o arreglo de un elemento) es /FlateDecode.
 def Pdf/is_flate(filter: PdfObj) -> u24:
   match filter:
     case PdfObj/Arr:
@@ -444,14 +416,6 @@ def Pdf/first_params(p: PdfObj) -> PdfObj:
           return p.items.head
     case _:
       return p
-
-# ---------------------------------------------------------------------------
-# Tabla de referencias cruzadas (xref)
-# ---------------------------------------------------------------------------
-# El mapa xref asocia número de objeto -> (tipo, a, b):
-#   tipo 1: objeto en el offset a (generación b)
-#   tipo 2: objeto comprimido en el object stream a, índice b
-#   tipo 0: libre
 
 def Pdf/startxref(pdf: List(u24)) -> u24:
   pos = Bytes/rfind(pdf, Bytes/from_string("startxref"))
@@ -480,62 +444,91 @@ def Pdf/xref_get(map, num: u24) -> (u24, u24, u24):
     case Maybe/None:
       return (0, 0, 0)
 
-# Carga la sección xref en `off` y todas las anteriores (/Prev).
-# Retorna (mapa, trailer, es_xref_stream).
 def Pdf/load_xref(pdf: List(u24), off: u24, depth: u24):
   if depth == 0:
-    return (Map/empty, Pdf/null, 0)
+    return (Map/empty, Pdf/null, 0, 0)
   else:
-    xs = Pdf/skip(Bytes/drop(pdf, off))
-    if Bytes/starts_with(xs, Bytes/from_string("xref")):
-      (entries, rest) = Pdf/classic_sections(Bytes/drop(xs, 4))
-      (trailer, *) = Pdf/parse(Bytes/drop(Pdf/skip(rest), 7))
-      base = Pdf/load_prev(pdf, trailer, depth)
+    (is_table, xs) = Bytes/strip_prefix(Pdf/skip(Bytes/drop(pdf, off)), Bytes/from_string("xref"))
+    if is_table:
+      (entries, rest) = Pdf/classic_sections(xs)
+      (*, after) = Bytes/strip_prefix(Pdf/skip(rest), Bytes/from_string("trailer"))
+      (trailer, *) = Pdf/parse(after)
+      (base, base_max) = Pdf/load_prev(pdf, trailer, depth)
+      top = Pdf/max(base_max, Pdf/max_num(entries, 0))
       if Pdf/has(trailer, "XRefStm"):
-        (sdict, sdata) = Pdf/read_indirect(Bytes/drop(pdf, Pdf/int(Pdf/get(trailer, "XRefStm"))))
-        base2 = Pdf/xref_set(base, Pdf/stream_entries(sdict, sdata))
-        return (Pdf/xref_set(base2, entries), trailer, 0)
+        (*, sdict, sdata) = Pdf/read_indirect(Bytes/drop(pdf, Pdf/int(Pdf/get(trailer, "XRefStm"))))
+        stream = Pdf/stream_entries(sdict, sdata)
+        hidden = Pdf/xref_set(base, Pdf/filter_kind(entries, 0, 1))
+        merged = Pdf/xref_set(Pdf/xref_set(hidden, stream), Pdf/filter_kind(entries, 0, 0))
+        return (merged, trailer, 0, Pdf/max(top, Pdf/max_num(stream, 0)))
       else:
-        return (Pdf/xref_set(base, entries), trailer, 0)
+        return (Pdf/xref_set(base, entries), trailer, 0, top)
     else:
-      (sdict, sdata) = Pdf/read_indirect(xs)
-      base = Pdf/load_prev(pdf, sdict, depth)
-      return (Pdf/xref_set(base, Pdf/stream_entries(sdict, sdata)), sdict, 1)
+      (*, sdict, sdata) = Pdf/read_indirect(xs)
+      stream = Pdf/stream_entries(sdict, sdata)
+      (base, base_max) = Pdf/load_prev(pdf, sdict, depth)
+      return (Pdf/xref_set(base, stream), sdict, 1, Pdf/max(base_max, Pdf/max_num(stream, 0)))
 
 def Pdf/load_prev(pdf: List(u24), trailer: PdfObj, depth: u24):
   if Pdf/has(trailer, "Prev"):
-    (m, *, *) = Pdf/load_xref(pdf, Pdf/int(Pdf/get(trailer, "Prev")), depth - 1)
-    return m
+    (m, *, *, top) = Pdf/load_xref(pdf, Pdf/int(Pdf/get(trailer, "Prev")), depth - 1)
+    return (m, top)
   else:
-    return Map/empty
+    return (Map/empty, 0)
 
-# Subsecciones "inicio cantidad" seguidas de entradas "offset gen n|f".
-def Pdf/classic_sections(xs: List(u24)):
-  s = Pdf/skip(xs)
-  if Bytes/is_digit(Pdf/head(s)):
-    (start, *, r1) = Bytes/parse_u24(s)
-    (count, *, r2) = Bytes/parse_u24(Pdf/skip(r1))
-    (es, r3) = Pdf/classic_entries(r2, start, count)
-    (more, r4) = Pdf/classic_sections(r3)
-    return (List/concat(es, more), r4)
+def Pdf/filter_kind(entries, kind: u24, keep: u24):
+  match entries:
+    case List/Nil:
+      return []
+    case List/Cons:
+      (num, k, a, b) = entries.head
+      if (k == kind) == keep:
+        return List/Cons((num, k, a, b), Pdf/filter_kind(entries.tail, kind, keep))
+      else:
+        return Pdf/filter_kind(entries.tail, kind, keep)
+
+def Pdf/max_num(entries, acc: u24) -> u24:
+  match entries:
+    case List/Nil:
+      return acc
+    case List/Cons:
+      (num, *, *, *) = entries.head
+      return Pdf/max_num(entries.tail, Pdf/max(acc, num))
+
+def Pdf/max(a: u24, b: u24) -> u24:
+  if a > b:
+    return a
   else:
-    return ([], s)
+    return b
+
+def Pdf/classic_sections(xs: List(u24)):
+  match s = Pdf/skip(xs):
+    case List/Nil:
+      return ([], [])
+    case List/Cons:
+      if Bytes/is_digit(s.head):
+        (start, *, r1) = Bytes/parse_u24(List/Cons(s.head, s.tail))
+        (count, *, r2) = Bytes/parse_u24(Pdf/skip(r1))
+        (es, r3) = Pdf/classic_entries(r2, start, count)
+        (more, r4) = Pdf/classic_sections(r3)
+        return (List/concat(es, more), r4)
+      else:
+        return ([], List/Cons(s.head, s.tail))
 
 def Pdf/classic_entries(xs: List(u24), num: u24, count: u24):
   if count == 0:
     return ([], xs)
   else:
-    (off, *, r1) = Bytes/parse_u24(Pdf/skip(xs))
-    (gen, *, r2) = Bytes/parse_u24(Pdf/skip(r1))
-    r3 = Pdf/skip(r2)
-    if Pdf/head(r3) == 'n':
-      kind = 1
-    else:
-      kind = 0
-    (rest, r4) = Pdf/classic_entries(Bytes/drop(r3, 1), num + 1, count - 1)
-    return (List/Cons((num, kind, off, gen), rest), r4)
+    match s = Pdf/skip(xs):
+      case List/Nil:
+        return ([], [])
+      case List/Cons:
+        (off, *, r1) = Bytes/parse_u24(List/Cons(s.head, s.tail))
+        (gen, *, r2) = Bytes/parse_u24(Pdf/skip(r1))
+        (flag, r3) = Bytes/pop(Pdf/skip(r2))
+        (rest, r4) = Pdf/classic_entries(r3, num + 1, count - 1)
+        return (List/Cons((num, flag == 'n', off, gen), rest), r4)
 
-# Entradas de un xref stream.
 def Pdf/stream_entries(dict: PdfObj, data: List(u24)):
   ws = Pdf/items(Pdf/get(dict, "W"))
   w1 = Pdf/int(Pdf/nth(ws, 0))
@@ -546,7 +539,10 @@ def Pdf/stream_entries(dict: PdfObj, data: List(u24)):
     idx = [0, Pdf/int(Pdf/get(dict, "Size"))]
   else:
     idx = Pdf/ints(Pdf/items(index))
-  return Pdf/stream_ranges(Pdf/decode_stream(dict, data), idx, w1, w2, w3)
+  if w1 + w2 + w3 == 0:
+    return []
+  else:
+    return Pdf/stream_ranges(Pdf/decode_stream(dict, data), idx, w1, w2, w3)
 
 def Pdf/stream_ranges(data: List(u24), idx: List(u24), w1: u24, w2: u24, w3: u24):
   match idx:
@@ -562,16 +558,19 @@ def Pdf/stream_rows(data: List(u24), num: u24, count: u24, w1: u24, w2: u24, w3:
   if count == 0:
     return ([], data)
   else:
-    if w1 == 0:
-      kind = 1
-    else:
-      kind = Bytes/to_uint_be(Bytes/take(data, w1))
-    d1 = Bytes/drop(data, w1)
-    a = Bytes/to_uint_be(Bytes/take(d1, w2))
-    d2 = Bytes/drop(d1, w2)
-    b = Bytes/to_uint_be(Bytes/take(d2, w3))
-    (rest, r) = Pdf/stream_rows(Bytes/drop(d2, w3), num + 1, count - 1, w1, w2, w3)
-    return (List/Cons((num, kind, a, b), rest), r)
+    match data:
+      case List/Nil:
+        return ([], [])
+      case List/Cons:
+        (f1, d1) = Bytes/split(List/Cons(data.head, data.tail), w1)
+        (f2, d2) = Bytes/split(d1, w2)
+        (f3, d3) = Bytes/split(d2, w3)
+        if w1 == 0:
+          kind = 1
+        else:
+          kind = Bytes/to_uint_be(f1)
+        (rest, r) = Pdf/stream_rows(d3, num + 1, count - 1, w1, w2, w3)
+        return (List/Cons((num, kind, Bytes/to_uint_be(f2), Bytes/to_uint_be(f3)), rest), r)
 
 def Pdf/nth(xs: List(PdfObj), i: u24) -> PdfObj:
   match xs:
@@ -590,25 +589,46 @@ def Pdf/ints(xs: List(PdfObj)) -> List(u24):
     case List/Cons:
       return List/Cons(Pdf/int(xs.head), Pdf/ints(xs.tail))
 
-# ---------------------------------------------------------------------------
-# Acceso a objetos por número
-# ---------------------------------------------------------------------------
-
 def Pdf/get_obj(pdf: List(u24), xref, num: u24) -> PdfObj:
   (kind, a, b) = Pdf/xref_get(xref, num)
   if kind == 1:
-    (obj, *) = Pdf/read_indirect(Bytes/drop(pdf, a))
-    return obj
+    (found, obj, *) = Pdf/read_indirect(Bytes/drop(pdf, a))
+    if found == num:
+      return obj
+    else:
+      return Pdf/find_obj(pdf, num, b)
   elif kind == 2:
     return Pdf/objstm_get(pdf, xref, a, b)
   else:
     return Pdf/null
 
-# Objeto `idx` dentro del object stream `stm`.
+def Pdf/find_obj(pdf: List(u24), num: u24, gen: u24) -> PdfObj:
+  pattern = Bytes/join([Bytes/from_u24(num), [32], Bytes/from_u24(gen), Bytes/from_string(" obj")])
+  pos = Pdf/find_def(pdf, pattern)
+  if pos == Bytes/NONE:
+    return Pdf/null
+  else:
+    (*, obj, *) = Pdf/read_indirect(Bytes/drop(pdf, pos))
+    return obj
+
+def Pdf/find_def(pdf: List(u24), pattern: List(u24)) -> u24:
+  return Pdf/find_def.go(pdf, Bytes/reverse(pattern), Bytes/len(pattern), [], 0, Bytes/NONE)
+
+def Pdf/find_def.go(xs: List(u24), rpat: List(u24), m: u24, win: List(u24), i: u24, last: u24) -> u24:
+  if (i >= m) & Bytes/starts_with(win, rpat) & Bytes/is_space(Bytes/at(win, m)):
+    found = i - m
+  else:
+    found = last
+  match xs:
+    case List/Nil:
+      return found
+    case List/Cons:
+      return Pdf/find_def.go(xs.tail, rpat, m, Bytes/take(List/Cons(xs.head, win), m + 1), i + 1, found)
+
 def Pdf/objstm_get(pdf: List(u24), xref, stm: u24, idx: u24) -> PdfObj:
   (kind, off, *) = Pdf/xref_get(xref, stm)
   if kind == 1:
-    (dict, raw) = Pdf/read_indirect(Bytes/drop(pdf, off))
+    (*, dict, raw) = Pdf/read_indirect(Bytes/drop(pdf, off))
     data = Pdf/decode_stream(dict, raw)
     first = Pdf/int(Pdf/get(dict, "First"))
     rel = Pdf/objstm_offset(data, idx)
@@ -617,7 +637,6 @@ def Pdf/objstm_get(pdf: List(u24), xref, stm: u24, idx: u24) -> PdfObj:
   else:
     return Pdf/null
 
-# El encabezado del object stream son pares "num offset".
 def Pdf/objstm_offset(xs: List(u24), idx: u24) -> u24:
   (*, *, r1) = Bytes/parse_u24(Pdf/skip(xs))
   (off, *, r2) = Bytes/parse_u24(Pdf/skip(r1))
@@ -626,7 +645,6 @@ def Pdf/objstm_offset(xs: List(u24), idx: u24) -> u24:
   else:
     return Pdf/objstm_offset(r2, idx - 1)
 
-# Resuelve una referencia (un nivel).
 def Pdf/resolve(pdf: List(u24), xref, o: PdfObj) -> PdfObj:
   match o:
     case PdfObj/Ref:
@@ -634,7 +652,6 @@ def Pdf/resolve(pdf: List(u24), xref, o: PdfObj) -> PdfObj:
     case _:
       return o
 
-# Primera página del árbol /Pages. Retorna (num, gen, dict).
 def Pdf/first_page(pdf: List(u24), xref, node_ref: PdfObj, depth: u24):
   match node_ref:
     case PdfObj/Ref:
@@ -647,90 +664,66 @@ def Pdf/first_page(pdf: List(u24), xref, node_ref: PdfObj, depth: u24):
     case _:
       return (0, 0, Pdf/null)
 
-# ---------------------------------------------------------------------------
-# Análisis del documento
-# ---------------------------------------------------------------------------
+def Pdf/docmdp_p(pdf: List(u24), xref, root: PdfObj) -> u24:
+  perms = Pdf/resolve(pdf, xref, Pdf/get(root, "Perms"))
+  sig = Pdf/resolve(pdf, xref, Pdf/get(perms, "DocMDP"))
+  if Pdf/is_dict(sig):
+    return Pdf/docmdp_ref(pdf, xref, Pdf/items(Pdf/resolve(pdf, xref, Pdf/get(sig, "Reference"))))
+  else:
+    return 0
+
+def Pdf/docmdp_ref(pdf: List(u24), xref, refs: List(PdfObj)) -> u24:
+  match refs:
+    case List/Nil:
+      return 2
+    case List/Cons:
+      r = Pdf/resolve(pdf, xref, refs.head)
+      if Pdf/name_is(Pdf/get(r, "TransformMethod"), "DocMDP"):
+        p = Pdf/get(Pdf/resolve(pdf, xref, Pdf/get(r, "TransformParams")), "P")
+        if Pdf/is_null(p):
+          return 2
+        else:
+          return Pdf/int(p)
+      else:
+        return Pdf/docmdp_ref(pdf, xref, refs.tail)
 
 type PdfInfo:
   New { len, startxref, xref, trailer, is_stream, size, root_num, root_gen, root, page_num, page_gen, page }
 
-# Lee la estructura necesaria para agregar una firma.
-# Retorna Result(PdfInfo, String).
 def Pdf/analyze(pdf: List(u24)):
   if Bytes/find(Bytes/take(pdf, 1024), Bytes/from_string("%PDF-")) == Bytes/NONE:
-    return Result/Err("pdf: falta el encabezado %PDF-")
+    return Result/Err("pdf: missing %PDF- header")
   else:
     sx = Pdf/startxref(pdf)
     if sx == Bytes/NONE:
-      return Result/Err("pdf: no se encontró startxref")
+      return Result/Err("pdf: startxref not found")
     else:
-      (xref, trailer, is_stream) = Pdf/load_xref(pdf, sx, 64)
+      (xref, trailer, is_stream, top) = Pdf/load_xref(pdf, sx, 64)
       if Pdf/has(trailer, "Encrypt"):
-        return Result/Err("pdf: los documentos cifrados no están soportados")
+        return Result/Err("pdf: encrypted documents are not supported")
       else:
         root_ref = Pdf/get(trailer, "Root")
         match root_ref:
           case PdfObj/Ref:
             root = Pdf/get_obj(pdf, xref, root_ref.num)
-            if Pdf/is_dict(root):
+            if Pdf/is_dict(root) == 0:
+              return Result/Err("pdf: catalog (/Root) is not a dictionary")
+            elif Pdf/docmdp_p(pdf, xref, root) == 1:
+              return Result/Err("pdf: the document is certified and does not allow changes (DocMDP P=1)")
+            else:
               (pn, pg, page) = Pdf/first_page(pdf, xref, Pdf/get(root, "Pages"), 32)
               if Pdf/is_dict(page):
-                return Result/Ok(PdfInfo/New(Bytes/len(pdf), sx, xref, trailer, is_stream, Pdf/int(Pdf/get(trailer, "Size")), root_ref.num, root_ref.gen, root, pn, pg, page))
+                size = Pdf/max(Pdf/int(Pdf/get(trailer, "Size")), top + 1)
+                return Result/Ok(PdfInfo/New(Bytes/len(pdf), sx, xref, trailer, is_stream, size, root_ref.num, root_ref.gen, root, pn, pg, page))
               else:
-                return Result/Err("pdf: no se encontró la primera página")
-            else:
-              return Result/Err("pdf: el catálogo (/Root) no es un diccionario")
+                return Result/Err("pdf: first page not found")
           case _:
-            return Result/Err("pdf: el trailer no tiene /Root")
+            return Result/Err("pdf: trailer has no /Root")
 
-# ---------------------------------------------------------------------------
-# Texto
-# ---------------------------------------------------------------------------
-
-# Decodifica UTF-8 a puntos de código.
-def Pdf/utf8_decode(xs: List(u24)) -> List(u24):
-  match xs:
-    case List/Nil:
-      return []
-    case List/Cons:
-      c = xs.head
-      if c < 0xC0:
-        # ASCII (o byte inválido, interpretado como Latin-1)
-        return List/Cons(c, Pdf/utf8_decode(xs.tail))
-      elif c < 0xE0:
-        b1 = Pdf/head(xs.tail)
-        return List/Cons(((c & 0x1F) << 6) | (b1 & 0x3F), Pdf/utf8_decode(Bytes/drop(xs, 2)))
-      elif c < 0xF0:
-        b1 = Bytes/at(xs, 1)
-        b2 = Bytes/at(xs, 2)
-        return List/Cons(((c & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F), Pdf/utf8_decode(Bytes/drop(xs, 3)))
-      else:
-        b1 = Bytes/at(xs, 1)
-        b2 = Bytes/at(xs, 2)
-        b3 = Bytes/at(xs, 3)
-        return List/Cons(((c & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F), Pdf/utf8_decode(Bytes/drop(xs, 4)))
-
-# Puntos de código -> UTF-16BE (con pares sustitutos).
-def Pdf/utf16be(cps: List(u24)) -> List(u24):
-  match cps:
-    case List/Nil:
-      return []
-    case List/Cons:
-      c = cps.head
-      if c < 0x10000:
-        return List/Cons(c >> 8, List/Cons(c & 0xFF, Pdf/utf16be(cps.tail)))
-      else:
-        v = c - 0x10000
-        hi = 0xD800 | (v >> 10)
-        lo = 0xDC00 | (v & 0x3FF)
-        return List/Cons(hi >> 8, List/Cons(hi & 0xFF, List/Cons(lo >> 8, List/Cons(lo & 0xFF, Pdf/utf16be(cps.tail)))))
-
-# Cadena de texto PDF a partir de UTF-8: <FEFF...> (UTF-16BE en hexadecimal).
 def Pdf/text_string(utf8: List(u24)) -> PdfObj:
-  hex = Bytes/to_hex_upper(Bytes/concat([0xFE, 0xFF], Pdf/utf16be(Pdf/utf8_decode(utf8))))
+  hex = Bytes/to_hex_upper(Bytes/concat([0xFE, 0xFF], Text/utf16be_encode(Text/utf8_decode(utf8))))
   return PdfObj/Raw(List/Cons('<', Bytes/concat(hex, ['>'])))
 
-# Cadena literal ASCII simple, escapando paréntesis y barra invertida.
 def Pdf/ascii_string(xs: List(u24)) -> PdfObj:
   return PdfObj/Raw(List/Cons('(', Bytes/concat(Pdf/escape(xs), [')'])))
 
@@ -745,15 +738,9 @@ def Pdf/escape(xs: List(u24)) -> List(u24):
       else:
         return List/Cons(c, Pdf/escape(xs.tail))
 
-# ---------------------------------------------------------------------------
-# Actualización incremental con campo de firma
-# ---------------------------------------------------------------------------
-
 type SigFields:
   New { name, reason, location, contact, time }
 
-# Constructor exportable de SigFields (todos los campos en bytes UTF-8;
-# `time` en formato YYYYMMDDHHmmSS UTC; los vacíos se omiten).
 def SigFields/new(name, reason, location, contact, time):
   return SigFields/New(name, reason, location, contact, time)
 
@@ -764,7 +751,6 @@ def Pdf/opt_text(d: PdfObj, key: String, v: List(u24)) -> PdfObj:
     case List/Cons:
       return Pdf/set(d, key, Pdf/text_string(v))
 
-# /M (D:YYYYMMDDHHmmSSZ) si se indicó la hora de firma.
 def Pdf/opt_date(d: PdfObj, t: List(u24)) -> PdfObj:
   match t:
     case List/Nil:
@@ -781,7 +767,6 @@ def Pdf/obj_footer() -> List(u24):
 def Pdf/indirect(num: u24, gen: u24, o: PdfObj) -> List(u24):
   return Bytes/join([Pdf/obj_header(num, gen), Pdf/serialize(o), Pdf/obj_footer])
 
-# Ancho fijo del texto de /ByteRange, para poder calcularlo después.
 def Pdf/BYTERANGE_WIDTH() -> u24:
   return 44
 
@@ -792,7 +777,6 @@ def Pdf/byterange_text(a: u24, b: u24, c: u24) -> List(u24):
   t = Bytes/join([Bytes/from_string("[0 "), Bytes/from_u24(a), [' '], Bytes/from_u24(b), [' '], Bytes/from_u24(c)])
   return Bytes/concat(Bytes/pad_right(t, Pdf/BYTERANGE_WIDTH - 1, ' '), [']'])
 
-# Diccionario de firma dividido en (antes de /Contents, después de /Contents).
 def Pdf/sig_dict_parts(f, byterange: List(u24)) -> (List(u24), List(u24)):
   open SigFields: f
   extra = Pdf/opt_text(Pdf/opt_text(Pdf/opt_text(Pdf/opt_text(PdfObj/Dict([]), "Name", f.name), "Reason", f.reason), "Location", f.location), "ContactInfo", f.contact)
@@ -806,12 +790,10 @@ def Pdf/sig_dict_parts(f, byterange: List(u24)) -> (List(u24), List(u24)):
   ])
   return (before, Bytes/from_string(">>"))
 
-# Agrega `item` a un arreglo que puede ser directo, indirecto o inexistente.
 def Pdf/append_to(pdf: List(u24), xref, arr: PdfObj, item: PdfObj) -> PdfObj:
   resolved = Pdf/resolve(pdf, xref, arr)
   return PdfObj/Arr(List/concat(Pdf/items(resolved), [item]))
 
-# Catálogo con /AcroForm que incluye el nuevo campo y /SigFlags 3.
 def Pdf/updated_catalog(pdf: List(u24), info, widget: u24) -> PdfObj:
   open PdfInfo: info
   acro = Pdf/resolve(pdf, info.xref, Pdf/get(info.root, "AcroForm"))
@@ -827,7 +809,6 @@ def Pdf/updated_page(pdf: List(u24), info, widget: u24) -> PdfObj:
   annots = Pdf/append_to(pdf, info.xref, Pdf/get(info.page, "Annots"), PdfObj/Ref(widget, 0))
   return Pdf/set(info.page, "Annots", annots)
 
-# Copia /Info e /ID del trailer original, si existen.
 def Pdf/copy_trailer_keys(trailer: PdfObj, d: PdfObj) -> PdfObj:
   info = Pdf/get(trailer, "Info")
   id = Pdf/get(trailer, "ID")
@@ -840,7 +821,6 @@ def Pdf/copy_trailer_keys(trailer: PdfObj, d: PdfObj) -> PdfObj:
   else:
     return Pdf/set(d2, "ID", id)
 
-# Sección xref clásica para la lista de (num, gen, offset).
 def Pdf/xref_table(objs: List((u24, u24, u24))) -> List(u24):
   match objs:
     case List/Nil:
@@ -850,7 +830,6 @@ def Pdf/xref_table(objs: List((u24, u24, u24))) -> List(u24):
       line = Bytes/join([Bytes/from_u24(num), Bytes/from_string(" 1\n"), Bytes/from_u24_padded(off, 10), [' '], Bytes/from_u24_padded(gen, 5), Bytes/from_string(" n\r\n")])
       return Bytes/concat(line, Pdf/xref_table(objs.tail))
 
-# Filas binarias del xref stream con /W [1 4 2].
 def Pdf/xref_rows(objs: List((u24, u24, u24))) -> List(u24):
   match objs:
     case List/Nil:
@@ -867,9 +846,6 @@ def Pdf/xref_index(objs: List((u24, u24, u24))) -> List(PdfObj):
       (num, *, *) = objs.head
       return List/Cons(Pdf/num(num), List/Cons(Pdf/lit("1"), Pdf/xref_index(objs.tail)))
 
-# Construye la actualización incremental. Retorna (A, C, cs, ce) donde
-# el archivo final es  pdf ++ A ++ "<" hex ">" ++ C  y [cs, ce) es la
-# posición absoluta del valor de /Contents incluyendo los delimitadores.
 def Pdf/build_update(pdf: List(u24), info, f, byterange: List(u24), sig_len: u24):
   open PdfInfo: info
   base = info.len
@@ -879,7 +855,6 @@ def Pdf/build_update(pdf: List(u24), info, f, byterange: List(u24), sig_len: u24
   sig_head = Bytes/concat(Pdf/obj_header(sig_num, 0), sig_before)
   contents_len = 2 + 2 * sig_len
   sig_tail = Bytes/concat(sig_after, Pdf/obj_footer)
-  # offsets
   off_sig = base + 1
   cs = off_sig + Bytes/len(sig_head)
   ce = cs + contents_len
@@ -887,7 +862,7 @@ def Pdf/build_update(pdf: List(u24), info, f, byterange: List(u24), sig_len: u24
     (Bytes/from_string("Type"), Pdf/name("Annot")),
     (Bytes/from_string("Subtype"), Pdf/name("Widget")),
     (Bytes/from_string("FT"), Pdf/name("Sig")),
-    (Bytes/from_string("T"), Pdf/ascii_string(Bytes/concat(Bytes/from_string("Firma"), Bytes/from_u24(sig_num)))),
+    (Bytes/from_string("T"), Pdf/ascii_string(Bytes/concat(Bytes/from_string("Signature"), Bytes/from_u24(sig_num)))),
     (Bytes/from_string("V"), PdfObj/Ref(sig_num, 0)),
     (Bytes/from_string("F"), Pdf/lit("132")),
     (Bytes/from_string("Rect"), PdfObj/Arr([Pdf/lit("0"), Pdf/lit("0"), Pdf/lit("0"), Pdf/lit("0")])),
@@ -928,7 +903,6 @@ def Pdf/build_update(pdf: List(u24), info, f, byterange: List(u24), sig_len: u24
   tail = Bytes/join([sig_tail, widget_bytes, catalog_bytes, page_bytes, xref_part, Bytes/from_string("startxref\n"), Bytes/from_u24(off_xref), Bytes/from_string("\n%%EOF\n")])
   return (List/Cons(10, sig_head), tail, cs, ce)
 
-# Ordena (num, gen, off) por número de objeto (inserción).
 def Pdf/sort_objs(xs: List((u24, u24, u24))) -> List((u24, u24, u24)):
   match xs:
     case List/Nil:
@@ -948,21 +922,16 @@ def Pdf/insert_obj(x: (u24, u24, u24), sorted: List((u24, u24, u24))) -> List((u
       else:
         return List/Cons(x, sorted)
 
-# Prepara el documento para firmar.
-# Retorna (A, C, digest_input) donde digest_input son los bytes cubiertos
-# por /ByteRange (todo el archivo excepto el valor de /Contents).
 def Pdf/prepare(pdf: List(u24), info, f, sig_len: u24):
-  # Primera pasada con /ByteRange provisional (mismo ancho) para medir.
   (*, c, cs, ce) = Pdf/build_update(pdf, info, f, Pdf/BYTERANGE_PLACEHOLDER, sig_len)
   total = ce + Bytes/len(c)
   br = Pdf/byterange_text(cs, ce, total - ce)
   (a2, c2, *, *) = Pdf/build_update(pdf, info, f, br, sig_len)
   return (a2, c2, Bytes/concat(pdf, Bytes/concat(a2, c2)))
 
-# Inserta el CMS (en hexadecimal, relleno con ceros) en /Contents.
 def Pdf/finish(pdf: List(u24), a: List(u24), c: List(u24), cms: List(u24), sig_len: u24):
   if Bytes/len(cms) > sig_len:
-    return Result/Err("pdf: la firma CMS no cabe en el espacio reservado")
+    return Result/Err("pdf: CMS signature does not fit in the reserved space")
   else:
     hex = Bytes/pad_right(Bytes/to_hex_upper(cms), 2 * sig_len, '0')
     return Result/Ok(Bytes/join([pdf, a, ['<'], hex, ['>'], c]))

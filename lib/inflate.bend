@@ -1,34 +1,20 @@
-# lib/inflate.bend
-# Descompresión DEFLATE (RFC 1951) y envoltorio zlib (RFC 1950), más los
-# predictores PNG (RFC 2083) que usan los xref streams de PDF.
-#
-# Implementación basada en el decodificador canónico de "puff" (zlib):
-# las tablas de Huffman se representan como una lista, por longitud de
-# código 1..15, de pares (cantidad, símbolos). La ventana de 32 KiB para
-# las referencias hacia atrás es un Map indexado por posición mod 2^15.
-
 from lib/bytes import *
 
-# ---------------------------------------------------------------------------
-# Lector de bits. Estado: (bytes_restantes, buffer, bits_en_buffer)
-# ---------------------------------------------------------------------------
-
 def Inflate/bits(s, need: u24):
-  (xs, buf, cnt) = s
+  (xs, buf, cnt, over) = s
   if cnt >= need:
-    return (buf & ((1 << need) - 1), (xs, buf >> need, cnt - need))
+    return (buf & ((1 << need) - 1), (xs, buf >> need, cnt - need, over))
   else:
     match xs:
       case List/Nil:
-        return Inflate/bits(([], buf, cnt + 8), need)
+        return Inflate/bits(([], buf, cnt + 8, over + 1), need)
       case List/Cons:
-        return Inflate/bits((xs.tail, buf | (xs.head << cnt), cnt + 8), need)
+        return Inflate/bits((xs.tail, buf | (xs.head << cnt), cnt + 8, over), need)
 
-# Descarta los bits hasta el siguiente límite de byte.
 def Inflate/align(s):
-  (xs, buf, cnt) = s
+  (xs, buf, cnt, over) = s
   r = cnt & 7
-  return (xs, buf >> r, cnt - r)
+  return (xs, buf >> r, cnt - r, over)
 
 def Inflate/at(xs: List(u24), i: u24) -> u24:
   match xs:
@@ -47,20 +33,21 @@ def Inflate/count(xs: List(u24)) -> u24:
     case List/Cons:
       return 1 + Inflate/count(xs.tail)
 
-# ---------------------------------------------------------------------------
-# Tablas de Huffman canónicas
-# ---------------------------------------------------------------------------
+type Huff:
+  Empty
+  Leaf { sym: u24 }
+  Node { zero: Huff, one: Huff }
 
-# Construye la tabla a partir de las longitudes de código (en orden de símbolo).
-def Inflate/build(lengths: List(u24)):
-  return Inflate/build.go(lengths, 1)
+def Inflate/build(lengths: List(u24)) -> Huff:
+  return Inflate/build.go(lengths, 1, 0, Huff/Empty)
 
-def Inflate/build.go(lengths: List(u24), len: u24):
+def Inflate/build.go(lengths: List(u24), len: u24, first: u24, tree: Huff) -> Huff:
   if len > 15:
-    return []
+    return tree
   else:
     syms = Inflate/syms_with_len(lengths, len, 0)
-    return List/Cons((Inflate/count(syms), syms), Inflate/build.go(lengths, len + 1))
+    count = Inflate/count(syms)
+    return Inflate/build.go(lengths, len + 1, (first + count) << 1, Inflate/insert_all(tree, syms, first, len))
 
 def Inflate/syms_with_len(lengths: List(u24), len: u24, sym: u24) -> List(u24):
   match lengths:
@@ -72,26 +59,45 @@ def Inflate/syms_with_len(lengths: List(u24), len: u24, sym: u24) -> List(u24):
       else:
         return Inflate/syms_with_len(lengths.tail, len, sym + 1)
 
-# Decodifica un símbolo. Retorna (símbolo, estado); 0xFFFF si el código es inválido.
-def Inflate/decode(s, table):
-  return Inflate/decode.go(s, table, 0, 0)
-
-def Inflate/decode.go(s, table, code: u24, first: u24):
-  match table:
+def Inflate/insert_all(tree: Huff, syms: List(u24), code: u24, len: u24) -> Huff:
+  match syms:
     case List/Nil:
-      return (0xFFFF, s)
+      return tree
     case List/Cons:
-      (bit, s2) = Inflate/bits(s, 1)
-      c = code | bit
-      (count, syms) = table.head
-      if c < first + count:
-        return (Inflate/at(syms, c - first), s2)
-      else:
-        return Inflate/decode.go(s2, table.tail, c << 1, (first + count) << 1)
+      return Inflate/insert_all(Inflate/insert(tree, code, len, syms.head), syms.tail, code + 1, len)
 
-# Tablas fijas. `z` debe ser 0 calculado en tiempo de ejecución: si la
-# expresión fuera cerrada, Bend la extraería como definición global y HVM no
-# permite duplicar referencias globales no afines.
+def Inflate/insert(tree: Huff, code: u24, len: u24, sym: u24) -> Huff:
+  if len == 0:
+    return Huff/Leaf(sym)
+  else:
+    bit = (code >> (len - 1)) & 1
+    match tree:
+      case Huff/Node:
+        if bit == 0:
+          return Huff/Node(Inflate/insert(tree.zero, code, len - 1, sym), tree.one)
+        else:
+          return Huff/Node(tree.zero, Inflate/insert(tree.one, code, len - 1, sym))
+      case _:
+        if bit == 0:
+          return Huff/Node(Inflate/insert(Huff/Empty, code, len - 1, sym), Huff/Empty)
+        else:
+          return Huff/Node(Huff/Empty, Inflate/insert(Huff/Empty, code, len - 1, sym))
+
+def Inflate/decode(s, tree: Huff):
+  match tree:
+    case Huff/Empty:
+      return (0xFFFF, s, Huff/Empty)
+    case Huff/Leaf:
+      return (tree.sym, s, Huff/Leaf(tree.sym))
+    case Huff/Node:
+      (bit, s1) = Inflate/bits(s, 1)
+      if bit == 0:
+        (sym, s2, zero) = Inflate/decode(s1, tree.zero)
+        return (sym, s2, Huff/Node(zero, tree.one))
+      else:
+        (sym, s2, one) = Inflate/decode(s1, tree.one)
+        return (sym, s2, Huff/Node(tree.zero, one))
+
 def Inflate/fixed_lit(z: u24):
   return Inflate/build(Bytes/concat(Bytes/repeat(8 + z, 144), Bytes/concat(Bytes/repeat(9 + z, 112), Bytes/concat(Bytes/repeat(7 + z, 24), Bytes/repeat(8 + z, 8)))))
 
@@ -110,15 +116,9 @@ def Inflate/DIST_BASE() -> List(u24):
 def Inflate/DIST_EXTRA() -> List(u24):
   return [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
 
-# Posición de cada símbolo 0..18 en el orden de transmisión de HCLEN.
 def Inflate/CLEN_POS() -> List(u24):
   return [3, 17, 15, 13, 11, 9, 7, 5, 4, 6, 8, 10, 12, 14, 16, 18, 0, 1, 2]
 
-# ---------------------------------------------------------------------------
-# Bloques
-# ---------------------------------------------------------------------------
-
-# Estado de salida: (ventana, posición, salida_invertida)
 def Inflate/emit(o, b: u24):
   (win, pos, out) = o
   return (Map/set(win, pos & 0x7FFF, b), pos + 1, List/Cons(b, out))
@@ -131,23 +131,37 @@ def Inflate/copy(o, len: u24, dist: u24):
     (b, win2) = Map/get(win, (pos - dist) & 0x7FFF)
     return Inflate/copy(Inflate/emit((win2, pos, out), b), len - 1, dist)
 
-# Decodifica símbolos hasta el fin de bloque (256). Retorna (estado, salida).
+def Inflate/MAX_OUTPUT() -> u24:
+  return 0x400000
+
 def Inflate/codes(s, o, lit, dist):
-  (sym, s1) = Inflate/decode(s, lit)
-  if sym < 256:
-    return Inflate/codes(s1, Inflate/emit(o, sym), lit, dist)
+  (sym, s1, lit2) = Inflate/decode(s, lit)
+  (x1, b1, c1, v1) = s1
+  (w0, p0, out0) = o
+  o = (w0, p0, out0)
+  if p0 >= Inflate/MAX_OUTPUT:
+    return ((x1, b1, c1, v1 + 1), o)
+  elif v1 > 0:
+    return ((x1, b1, c1, v1), o)
+  elif sym < 256:
+    return Inflate/codes((x1, b1, c1, v1), Inflate/emit(o, sym), lit2, dist)
   elif sym == 256:
-    return (s1, o)
+    return ((x1, b1, c1, v1), o)
   elif sym > 285:
-    return (s1, o)
+    return ((x1, b1, c1, v1 + 1), o)
   else:
     li = sym - 257
-    (le, s2) = Inflate/bits(s1, Inflate/at(Inflate/LEN_EXTRA, li))
+    (le, s2) = Inflate/bits((x1, b1, c1, v1), Inflate/at(Inflate/LEN_EXTRA, li))
     len = Inflate/at(Inflate/LEN_BASE, li) + le
-    (dsym, s3) = Inflate/decode(s2, dist)
+    (dsym, s3, dist2) = Inflate/decode(s2, dist)
     (de, s4) = Inflate/bits(s3, Inflate/at(Inflate/DIST_EXTRA, dsym))
     d = Inflate/at(Inflate/DIST_BASE, dsym) + de
-    return Inflate/codes(s4, Inflate/copy(o, len, d), lit, dist)
+    (x4, b4, c4, v4) = s4
+    (win, pos, out) = o
+    if (v4 > 0) | (dsym > 29) | (d > pos):
+      return ((x4, b4, c4, v4 + 1), (win, pos, out))
+    else:
+      return Inflate/codes((x4, b4, c4, v4), Inflate/copy((win, pos, out), len, d), lit2, dist2)
 
 def Inflate/stored(s, o):
   (len, s1) = Inflate/bits(Inflate/align(s), 16)
@@ -159,9 +173,13 @@ def Inflate/stored.go(s, o, n: u24):
     return (s, o)
   else:
     (b, s2) = Inflate/bits(s, 8)
-    return Inflate/stored.go(s2, Inflate/emit(o, b), n - 1)
+    (x, bb, c, v) = s2
+    (w0, p0, out0) = o
+    if (v > 0) | (p0 >= Inflate/MAX_OUTPUT):
+      return ((x, bb, c, v + (p0 >= Inflate/MAX_OUTPUT)), (w0, p0, out0))
+    else:
+      return Inflate/stored.go((x, bb, c, v), Inflate/emit((w0, p0, out0), b), n - 1)
 
-# Lee `n` valores de 3 bits.
 def Inflate/read3(s, n: u24):
   if n == 0:
     return ([], s)
@@ -170,7 +188,6 @@ def Inflate/read3(s, n: u24):
     (vs, s3) = Inflate/read3(s2, n - 1)
     return (List/Cons(v, vs), s3)
 
-# Longitudes del código de longitudes, en orden de símbolo 0..18.
 def Inflate/clen_lengths(vals: List(u24), hclen: u24, pos: List(u24)) -> List(u24):
   match pos:
     case List/Nil:
@@ -181,23 +198,22 @@ def Inflate/clen_lengths(vals: List(u24), hclen: u24, pos: List(u24)) -> List(u2
       else:
         return List/Cons(0, Inflate/clen_lengths(vals, hclen, pos.tail))
 
-# Lee `n` longitudes de código usando la tabla `clen`. acc está invertida.
 def Inflate/read_lengths(s, clen, n: u24, prev: u24, acc: List(u24)):
   if n == 0:
     return (Bytes/reverse(acc), s)
   else:
-    (sym, s1) = Inflate/decode(s, clen)
+    (sym, s1, clen2) = Inflate/decode(s, clen)
     if sym < 16:
-      return Inflate/read_lengths(s1, clen, n - 1, sym, List/Cons(sym, acc))
+      return Inflate/read_lengths(s1, clen2, n - 1, sym, List/Cons(sym, acc))
     elif sym == 16:
       (r, s2) = Inflate/bits(s1, 2)
-      return Inflate/repeat_len(s2, clen, n, prev, acc, 3 + r, prev)
+      return Inflate/repeat_len(s2, clen2, n, prev, acc, 3 + r, prev)
     elif sym == 17:
       (r, s2) = Inflate/bits(s1, 3)
-      return Inflate/repeat_len(s2, clen, n, 0, acc, 3 + r, 0)
+      return Inflate/repeat_len(s2, clen2, n, 0, acc, 3 + r, 0)
     else:
       (r, s2) = Inflate/bits(s1, 7)
-      return Inflate/repeat_len(s2, clen, n, 0, acc, 11 + r, 0)
+      return Inflate/repeat_len(s2, clen2, n, 0, acc, 11 + r, 0)
 
 def Inflate/repeat_len(s, clen, n: u24, prev: u24, acc: List(u24), times: u24, v: u24):
   if (times == 0) | (n == 0):
@@ -228,36 +244,20 @@ def Inflate/blocks(s, o):
   elif type == 2:
     (s3, o2) = Inflate/dynamic(s2, o)
   else:
-    (s3, o2) = (([], 0, 0), o)
-  (xs, *, *) = s3
-  if last:
+    (s3, o2) = (([], 0, 0, 1), o)
+  (xs, buf, cnt, over) = s3
+  if last | (over > 0):
     return o2
   else:
-    match xs:
-      case List/Nil:
-        return o2
-      case List/Cons:
-        return Inflate/blocks(s3, o2)
+    return Inflate/blocks((xs, buf, cnt, over), o2)
 
-# ---------------------------------------------------------------------------
-# API
-# ---------------------------------------------------------------------------
-
-# Descomprime datos DEFLATE "crudos".
 def Inflate/raw(xs: List(u24)) -> List(u24):
-  (*, *, out) = Inflate/blocks((xs, 0, 0), (Map/empty, 0, []))
+  (*, *, out) = Inflate/blocks((xs, 0, 0, 0), (Map/empty, 0, []))
   return Bytes/reverse(out)
 
-# Descomprime un flujo zlib (encabezado de 2 bytes + DEFLATE + Adler-32).
 def Inflate/zlib(xs: List(u24)) -> List(u24):
   return Inflate/raw(Bytes/drop(xs, 2))
 
-# ---------------------------------------------------------------------------
-# Predictores PNG (/Predictor >= 10 en /DecodeParms)
-# ---------------------------------------------------------------------------
-
-# Revierte el filtrado PNG por filas. `columns` = bytes por fila (sin el byte
-# de tipo de filtro), `bpp` = bytes por píxel (1 para xref streams).
 def Png/unfilter(data: List(u24), columns: u24, bpp: u24) -> List(u24):
   return Png/rows(data, columns, bpp, Bytes/repeat(0, columns))
 
@@ -266,20 +266,17 @@ def Png/rows(data: List(u24), columns: u24, bpp: u24, prev: List(u24)) -> List(u
     case List/Nil:
       return []
     case List/Cons:
-      ftype = data.head
-      row = Bytes/take(data.tail, columns)
-      out = Png/row(ftype, row, prev, Bytes/repeat(0, bpp), Bytes/repeat(0, bpp))
-      return Bytes/concat(out, Png/rows(Bytes/drop(data.tail, columns), columns, bpp, out))
+      (row, rest) = Bytes/split(data.tail, columns)
+      out = Png/row(data.head, row, prev, Bytes/repeat(0, bpp), Bytes/repeat(0, bpp))
+      return Bytes/concat(out, Png/rows(rest, columns, bpp, out))
 
-# left/upleft: colas con los últimos `bpp` bytes decodificados (izquierda y
-# diagonal superior izquierda), la más antigua primero.
 def Png/row(ftype: u24, row: List(u24), up: List(u24), left: List(u24), upleft: List(u24)) -> List(u24):
   match row:
     case List/Nil:
       return []
     case List/Cons:
       a = Inflate/at(left, 0)
-      b = Inflate/at(up, 0)
+      (b, up_rest) = Bytes/pop(up)
       c = Inflate/at(upleft, 0)
       x = row.head
       if ftype == 0:
@@ -294,7 +291,7 @@ def Png/row(ftype: u24, row: List(u24), up: List(u24), left: List(u24), upleft: 
         v = (x + Png/paeth(a, b, c)) & 0xFF
       left2 = List/concat(Bytes/drop(left, 1), [v])
       upleft2 = List/concat(Bytes/drop(upleft, 1), [b])
-      return List/Cons(v, Png/row(ftype, row.tail, Bytes/drop(up, 1), left2, upleft2))
+      return List/Cons(v, Png/row(ftype, row.tail, up_rest, left2, upleft2))
 
 def Png/abs_diff(x: u24, y: u24) -> u24:
   if x > y:
@@ -303,7 +300,6 @@ def Png/abs_diff(x: u24, y: u24) -> u24:
     return y - x
 
 def Png/paeth(a: u24, b: u24, c: u24) -> u24:
-  # p = a + b - c; pa = |p - a| = |b - c|; pb = |a - c|; pc = |a + b - 2c|
   pa = Png/abs_diff(b, c)
   pb = Png/abs_diff(a, c)
   pc = Png/abs_diff(a + b, c + c)

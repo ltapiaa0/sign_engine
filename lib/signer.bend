@@ -1,16 +1,3 @@
-# lib/signer.bend
-# Orquestación de la firma de un PDF: une las librerías pdf, cms, rsa y x509.
-#
-#   Signer/sign_pdf(pdf, key, certs, params) -> Result(pdf_firmado, error)
-#
-# `params` es un texto "clave=valor" por línea (UTF-8):
-#   name=...       nombre del firmante (por defecto, el CN del certificado)
-#   reason=...     motivo
-#   location=...   lugar
-#   contact=...    contacto
-#   time=YYYYMMDDHHmmSS   hora UTC de la firma (/M)
-#   sig_size=N     bytes reservados para el CMS (por defecto 8192)
-
 from lib/bytes import *
 from lib/sha256 import *
 from lib/rsa import *
@@ -19,11 +6,6 @@ from lib/x509 import *
 from lib/cms import *
 from lib/pdf import *
 
-# ---------------------------------------------------------------------------
-# Parámetros
-# ---------------------------------------------------------------------------
-
-# Lista de (clave, valor) a partir del texto de parámetros.
 def Signer/parse_params(text: List(u24)) -> List((List(u24), List(u24))):
   return Signer/parse_lines(Bytes/lines(text))
 
@@ -65,11 +47,23 @@ def Signer/or_default(v: List(u24), d: List(u24)) -> List(u24):
 def Signer/DEFAULT_SIG_SIZE() -> u24:
   return 8192
 
-# ---------------------------------------------------------------------------
-# Firma
-# ---------------------------------------------------------------------------
+def Signer/MAX_SIG_SIZE() -> u24:
+  return 0x40000
 
-# Primer elemento y resto de una lista de certificados.
+def Signer/sig_size(ps: List((List(u24), List(u24)))) -> u24:
+  (value, digits, *) = Bytes/parse_u24(Signer/param(ps, "sig_size"))
+  if digits == 0:
+    return Signer/DEFAULT_SIG_SIZE
+  else:
+    return value
+
+def Signer/longer_than(xs: List(u24), n: u24) -> u24:
+  match Bytes/drop(xs, n):
+    case List/Nil:
+      return 0
+    case List/Cons:
+      return 1
+
 def Signer/split_certs(certs: List(List(u24))) -> (List(u24), List(List(u24))):
   match certs:
     case List/Nil:
@@ -77,35 +71,55 @@ def Signer/split_certs(certs: List(List(u24))) -> (List(u24), List(List(u24))):
     case List/Cons:
       return (certs.head, certs.tail)
 
-# Firma un PDF. `key_bytes` y `cert_bytes` en PEM o DER; el PEM de
-# certificados puede traer la cadena completa (firmante primero).
+def Signer/valid_chain(chain: List(List(u24))) -> u24:
+  match chain:
+    case List/Nil:
+      return 1
+    case List/Cons:
+      match cert = X509/read_cert_der(chain.head):
+        case Result/Ok:
+          return Signer/valid_chain(chain.tail)
+        case Result/Err:
+          return 0
+
 def Signer/sign_pdf(pdf: List(u24), key_bytes: List(u24), cert_bytes: List(u24), params_text: List(u24)):
   match key = X509/read_rsa_key(key_bytes):
     case Result/Err:
       return Result/Err(key.val)
     case Result/Ok:
-      (signer_der, chain) = Signer/split_certs(Pem/decode_all(cert_bytes))
-      match cert = X509/read_cert(signer_der):
+      match ders = X509/cert_ders(cert_bytes):
         case Result/Err:
-          return Result/Err(cert.val)
+          return Result/Err(ders.val)
         case Result/Ok:
-          match info = Pdf/analyze(pdf):
+          (signer_der, chain) = Signer/split_certs(ders.val)
+          match cert = X509/read_cert_der(signer_der):
             case Result/Err:
-              return Result/Err(info.val)
+              return Result/Err(cert.val)
             case Result/Ok:
-              return Signer/sign_with(pdf, info.val, key.val, cert.val, chain, Signer/parse_params(params_text))
+              if Signer/valid_chain(chain) == 0:
+                return Result/Err("certificate: invalid certificate in the chain")
+              else:
+                return Signer/sign_checked(pdf, key.val, cert.val, chain, Signer/parse_params(params_text))
 
-def Signer/sign_with(pdf: List(u24), info, key, cert, chain: List(List(u24)), ps):
+def Signer/sign_checked(pdf: List(u24), key, cert, chain: List(List(u24)), ps):
+  sig_len = Signer/sig_size(ps)
+  if (sig_len < 1024) | (sig_len > Signer/MAX_SIG_SIZE):
+    return Result/Err("signer: sig_size must be between 1024 and 262144")
+  elif Signer/longer_than(pdf, 0xFFFFFF - 0x10000 - 2 * sig_len):
+    return Result/Err("pdf: document too large (limit 16 MiB)")
+  else:
+    match info = Pdf/analyze(pdf):
+      case Result/Err:
+        return Result/Err(info.val)
+      case Result/Ok:
+        return Signer/sign_with(pdf, info.val, key, cert, chain, ps, sig_len)
+
+def Signer/sign_with(pdf: List(u24), info, key, cert, chain: List(List(u24)), ps, sig_len: u24):
   open CertInfo: cert
   open RsaKey: key
   if Bytes/equal(Bytes/strip_zeros(key.n), Bytes/strip_zeros(cert.n)) == 0:
-    return Result/Err("la llave privada no corresponde al certificado")
+    return Result/Err("signer: private key does not match the certificate")
   else:
-    (size_v, size_n, *) = Bytes/parse_u24(Signer/param(ps, "sig_size"))
-    if size_n == 0:
-      sig_len = Signer/DEFAULT_SIG_SIZE
-    else:
-      sig_len = size_v
     fields = SigFields/new(Signer/or_default(Signer/param(ps, "name"), cert.subject_cn), Signer/param(ps, "reason"), Signer/param(ps, "location"), Signer/param(ps, "contact"), Signer/param(ps, "time"))
     (a, c, covered) = Pdf/prepare(pdf, info, fields, sig_len)
     attrs = Cms/signed_attrs(Sha256/digest(covered), cert.der)

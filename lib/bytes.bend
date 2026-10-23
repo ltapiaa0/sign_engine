@@ -1,21 +1,6 @@
-# lib/bytes.bend
-# Utilidades para secuencias de bytes.
-#
-# Un "Bytes" es una List(u24) donde cada elemento es un valor 0..255.
-# Las posiciones y longitudes son u24, por lo que el tamaño máximo
-# soportado es 16 MiB (2^24 - 1 bytes).
-
-# Valor centinela para "no encontrado".
 def Bytes/NONE() -> u24:
   return 0xFFFFFF
 
-# ---------------------------------------------------------------------------
-# Construcción y acceso
-# ---------------------------------------------------------------------------
-
-# Normaliza datos leídos con IO/FS: el runtime C de HVM 2.0 extiende el
-# signo de los bytes >= 0x80 (0x93 llega como 0xFFFF93), así que todo lo
-# que venga de un archivo debe pasar por aquí.
 def Bytes/from_io(xs: List(u24)) -> List(u24):
   match xs:
     case List/Nil:
@@ -37,7 +22,6 @@ def Bytes/concat(xs: List(u24), ys: List(u24)) -> List(u24):
     case List/Cons:
       return List/Cons(xs.head, Bytes/concat(xs.tail, ys))
 
-# Concatena una lista de Bytes.
 def Bytes/join(xss: List(List(u24))) -> List(u24):
   match xss:
     case List/Nil:
@@ -65,10 +49,6 @@ def Bytes/drop(xs: List(u24), n: u24) -> List(u24):
       case List/Cons:
         return Bytes/drop(xs.tail, n - 1)
 
-def Bytes/slice(xs: List(u24), start: u24, len: u24) -> List(u24):
-  return Bytes/take(Bytes/drop(xs, start), len)
-
-# Elemento en la posición i (0 si está fuera de rango).
 def Bytes/at(xs: List(u24), i: u24) -> u24:
   match xs:
     case List/Nil:
@@ -95,7 +75,6 @@ def Bytes/repeat(b: u24, n: u24) -> List(u24):
   else:
     return List/Cons(b, Bytes/repeat(b, n - 1))
 
-# Rellena por la izquierda con `b` hasta longitud `n`.
 def Bytes/pad_left(xs: List(u24), n: u24, b: u24) -> List(u24):
   len = Bytes/len(xs)
   if len >= n:
@@ -103,7 +82,6 @@ def Bytes/pad_left(xs: List(u24), n: u24, b: u24) -> List(u24):
   else:
     return Bytes/concat(Bytes/repeat(b, n - len), xs)
 
-# Rellena por la derecha con `b` hasta longitud `n`.
 def Bytes/pad_right(xs: List(u24), n: u24, b: u24) -> List(u24):
   len = Bytes/len(xs)
   if len >= n:
@@ -129,7 +107,6 @@ def Bytes/equal(xs: List(u24), ys: List(u24)) -> u24:
           else:
             return 0
 
-# 1 si `prefix` es prefijo de `xs`.
 def Bytes/starts_with(xs: List(u24), prefix: List(u24)) -> u24:
   match prefix:
     case List/Nil:
@@ -144,7 +121,6 @@ def Bytes/starts_with(xs: List(u24), prefix: List(u24)) -> u24:
           else:
             return 0
 
-# Comparación lexicográfica: 0 si a < b, 1 si a == b, 2 si a > b.
 def Bytes/compare(a: List(u24), b: List(u24)) -> u24:
   match a:
     case List/Nil:
@@ -165,7 +141,6 @@ def Bytes/compare(a: List(u24), b: List(u24)) -> u24:
           else:
             return Bytes/compare(a.tail, b.tail)
 
-# Ordena una lista de Bytes (inserción, para listas pequeñas como SET OF DER).
 def Bytes/sort(xss: List(List(u24))) -> List(List(u24)):
   match xss:
     case List/Nil:
@@ -183,51 +158,81 @@ def Bytes/sort.insert(x: List(u24), sorted: List(List(u24))) -> List(List(u24)):
       else:
         return List/Cons(x, sorted)
 
-# ---------------------------------------------------------------------------
-# Búsqueda
-# ---------------------------------------------------------------------------
-
-# Posición de la primera aparición de `needle` en `xs`, o Bytes/NONE.
 def Bytes/find(xs: List(u24), needle: List(u24)) -> u24:
-  return Bytes/find.go(xs, needle, 0)
+  match needle:
+    case List/Nil:
+      return 0
+    case List/Cons:
+      return Bytes/find.go(xs, List/Cons(needle.head, needle.tail), needle.head, Bytes/len(needle), 0)
 
-def Bytes/find.go(xs: List(u24), needle: List(u24), i: u24) -> u24:
-  if Bytes/starts_with(xs, needle):
-    return i
+def Bytes/find.go(xs: List(u24), needle: List(u24), first: u24, m: u24, i: u24) -> u24:
+  match xs:
+    case List/Nil:
+      return Bytes/NONE
+    case List/Cons:
+      if xs.head == first:
+        (front, rest) = Bytes/split(List/Cons(xs.head, xs.tail), m)
+        if Bytes/equal(front, needle):
+          return i
+        else:
+          return Bytes/find.go(Bytes/concat(Bytes/drop(front, 1), rest), needle, first, m, i + 1)
+      else:
+        return Bytes/find.go(xs.tail, needle, first, m, i + 1)
+
+def Bytes/rfind(xs: List(u24), needle: List(u24)) -> u24:
+  (rev, n) = Bytes/reverse_len(xs, [], 0)
+  m = Bytes/len(needle)
+  p = Bytes/find(rev, Bytes/reverse(needle))
+  if p == Bytes/NONE:
+    return Bytes/NONE
+  else:
+    return n - p - m
+
+def Bytes/reverse_len(xs: List(u24), acc: List(u24), n: u24) -> (List(u24), u24):
+  match xs:
+    case List/Nil:
+      return (acc, n)
+    case List/Cons:
+      return Bytes/reverse_len(xs.tail, List/Cons(xs.head, acc), n + 1)
+
+def Bytes/split(xs: List(u24), n: u24) -> (List(u24), List(u24)):
+  if n == 0:
+    return ([], xs)
   else:
     match xs:
       case List/Nil:
-        return Bytes/NONE
+        return ([], [])
       case List/Cons:
-        return Bytes/find.go(xs.tail, needle, i + 1)
+        (front, back) = Bytes/split(xs.tail, n - 1)
+        return (List/Cons(xs.head, front), back)
 
-# Posición de la primera aparición de `needle` a partir de `from`.
-def Bytes/find_from(xs: List(u24), needle: List(u24), from: u24) -> u24:
-  return Bytes/find.go(Bytes/drop(xs, from), needle, from)
-
-# Posición de la última aparición de `needle` en `xs`, o Bytes/NONE.
-def Bytes/rfind(xs: List(u24), needle: List(u24)) -> u24:
-  return Bytes/rfind.go(xs, needle, 0, Bytes/NONE)
-
-def Bytes/rfind.go(xs: List(u24), needle: List(u24), i: u24, last: u24) -> u24:
+def Bytes/pop(xs: List(u24)) -> (u24, List(u24)):
   match xs:
     case List/Nil:
-      return last
+      return (0, [])
     case List/Cons:
-      if Bytes/starts_with(xs, needle):
-        return Bytes/rfind.go(xs.tail, needle, i + 1, i)
-      else:
-        return Bytes/rfind.go(xs.tail, needle, i + 1, last)
+      return (xs.head, xs.tail)
 
-# ---------------------------------------------------------------------------
-# Texto ASCII
-# ---------------------------------------------------------------------------
+def Bytes/strip_prefix(xs: List(u24), prefix: List(u24)) -> (u24, List(u24)):
+  match prefix:
+    case List/Nil:
+      return (1, xs)
+    case List/Cons:
+      match xs:
+        case List/Nil:
+          return (0, [])
+        case List/Cons:
+          if xs.head == prefix.head:
+            (ok, rest) = Bytes/strip_prefix(xs.tail, prefix.tail)
+            if ok:
+              return (1, rest)
+            else:
+              return (0, List/Cons(xs.head, rest))
+          else:
+            return (0, List/Cons(xs.head, xs.tail))
 
 def Bytes/from_string(s: String) -> List(u24):
   return String/encode_ascii(s)
-
-def Bytes/to_string(xs: List(u24)) -> String:
-  return String/decode_ascii(xs)
 
 def Bytes/is_space(c: u24) -> u24:
   return (c == 32) | (c == 10) | (c == 13) | (c == 9) | (c == 12) | (c == 0)
@@ -245,22 +250,18 @@ def Bytes/skip_spaces(xs: List(u24)) -> List(u24):
       else:
         return xs
 
-# Elimina espacios en ambos extremos.
 def Bytes/trim(xs: List(u24)) -> List(u24):
   return Bytes/reverse(Bytes/skip_spaces(Bytes/reverse(Bytes/skip_spaces(xs))))
 
-# Representación decimal ASCII de un u24.
 def Bytes/from_u24(n: u24) -> List(u24):
   if n < 10:
     return [48 + n]
   else:
     return Bytes/concat(Bytes/from_u24(n / 10), [48 + (n % 10)])
 
-# Decimal con ancho fijo, relleno de ceros a la izquierda.
 def Bytes/from_u24_padded(n: u24, width: u24) -> List(u24):
   return Bytes/pad_left(Bytes/from_u24(n), width, 48)
 
-# Lee un entero decimal al inicio de `xs`: retorna (valor, dígitos_leídos, resto).
 def Bytes/parse_u24(xs: List(u24)) -> (u24, u24, List(u24)):
   return Bytes/parse_u24.go(xs, 0, 0)
 
@@ -274,7 +275,6 @@ def Bytes/parse_u24.go(xs: List(u24), acc: u24, n: u24) -> (u24, u24, List(u24))
       else:
         return (acc, n, xs)
 
-# Divide en líneas por '\n' (descarta '\r' final de cada línea).
 def Bytes/lines(xs: List(u24)) -> List(List(u24)):
   return Bytes/lines.go(xs, [])
 
@@ -294,11 +294,6 @@ def Bytes/lines.go(xs: List(u24), cur: List(u24)) -> List(List(u24)):
       else:
         return Bytes/lines.go(xs.tail, List/Cons(xs.head, cur))
 
-# ---------------------------------------------------------------------------
-# Enteros <-> bytes (big-endian)
-# ---------------------------------------------------------------------------
-
-# Codifica `n` en `width` bytes big-endian (width <= 3 para u24 completo).
 def Bytes/from_uint_be(n: u24, width: u24) -> List(u24):
   return Bytes/from_uint_be.go(n, width, [])
 
@@ -318,7 +313,6 @@ def Bytes/to_uint_be.go(xs: List(u24), acc: u24) -> u24:
     case List/Cons:
       return Bytes/to_uint_be.go(xs.tail, (acc << 8) | xs.head)
 
-# Elimina ceros iniciales.
 def Bytes/strip_zeros(xs: List(u24)) -> List(u24):
   match xs:
     case List/Nil:
@@ -328,10 +322,6 @@ def Bytes/strip_zeros(xs: List(u24)) -> List(u24):
         return Bytes/strip_zeros(xs.tail)
       else:
         return xs
-
-# ---------------------------------------------------------------------------
-# Hexadecimal
-# ---------------------------------------------------------------------------
 
 def Bytes/hex_digit(n: u24) -> u24:
   if n < 10:
@@ -345,7 +335,6 @@ def Bytes/hex_digit_upper(n: u24) -> u24:
   else:
     return 55 + n
 
-# Valor de un dígito hexadecimal ASCII, o 0xFF si no es hexadecimal.
 def Bytes/hex_value(c: u24) -> u24:
   if (c >= 48) & (c <= 57):
     return c - 48
@@ -370,8 +359,6 @@ def Bytes/to_hex_upper(xs: List(u24)) -> List(u24):
     case List/Cons:
       return List/Cons(Bytes/hex_digit_upper(xs.head >> 4), List/Cons(Bytes/hex_digit_upper(xs.head & 15), Bytes/to_hex_upper(xs.tail)))
 
-# Decodifica hexadecimal ignorando caracteres no hexadecimales (espacios, saltos).
-# Un dígito final impar se completa con 0 (como en las cadenas hex de PDF).
 def Bytes/from_hex(xs: List(u24)) -> List(u24):
   return Bytes/from_hex.go(xs, 0xFF)
 
@@ -391,10 +378,6 @@ def Bytes/from_hex.go(xs: List(u24), hi: u24) -> List(u24):
       else:
         return List/Cons((hi << 4) | v, Bytes/from_hex.go(xs.tail, 0xFF))
 
-# ---------------------------------------------------------------------------
-# Base64 (RFC 4648)
-# ---------------------------------------------------------------------------
-
 def Bytes/b64_char(n: u24) -> u24:
   if n < 26:
     return 65 + n
@@ -407,7 +390,6 @@ def Bytes/b64_char(n: u24) -> u24:
   else:
     return 47
 
-# Valor de un carácter base64, 0xFE para '=', 0xFF para cualquier otro.
 def Bytes/b64_value(c: u24) -> u24:
   if (c >= 65) & (c <= 90):
     return c - 65
@@ -447,11 +429,9 @@ def Bytes/to_base64(xs: List(u24)) -> List(u24):
               n = (a << 16) | (b << 8) | c
               return List/Cons(Bytes/b64_char(n >> 18), List/Cons(Bytes/b64_char((n >> 12) & 63), List/Cons(Bytes/b64_char((n >> 6) & 63), List/Cons(Bytes/b64_char(n & 63), Bytes/to_base64(t2.tail)))))
 
-# Decodifica base64 ignorando espacios/saltos de línea; se detiene en '='.
 def Bytes/from_base64(xs: List(u24)) -> List(u24):
   return Bytes/from_base64.go(xs, 0, 0)
 
-# acc: bits acumulados, n: cantidad de bits en acc
 def Bytes/from_base64.go(xs: List(u24), acc: u24, n: u24) -> List(u24):
   match xs:
     case List/Nil:

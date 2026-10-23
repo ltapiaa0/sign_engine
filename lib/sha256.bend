@@ -1,14 +1,5 @@
-# lib/sha256.bend
-# SHA-256 (FIPS 180-4).
-#
-# Bend sólo tiene enteros de 24 bits, así que cada palabra de 32 bits se
-# representa como dos mitades de 16 bits (hi, lo). Para reducir el número de
-# interacciones en HVM, las rondas trabajan con el estado "aplanado" en 16
-# argumentos en lugar de tuplas y las rotaciones se expanden con constantes.
-
 from lib/bytes import *
 
-# Constantes K en formato plano [hi, lo, hi, lo, ...].
 def Sha256/K() -> List(u24):
   return [
     0x428a, 0x2f98, 0x7137, 0x4491, 0xb5c0, 0xfbcf, 0xe9b5, 0xdba5,
@@ -29,14 +20,12 @@ def Sha256/K() -> List(u24):
     0x90be, 0xfffa, 0xa450, 0x6ceb, 0xbef9, 0xa3f7, 0xc671, 0x78f2
   ]
 
-# Estado inicial H0 como tupla plana de 16 mitades.
 def Sha256/H0():
   return (0x6a09, 0xe667, 0xbb67, 0xae85, 0x3c6e, 0xf372, 0xa54f, 0xf53a, 0x510e, 0x527f, 0x9b05, 0x688c, 0x1f83, 0xd9ab, 0x5be0, 0xcd19)
 
 def W32/to_bytes(h: u24, l: u24, rest: List(u24)) -> List(u24):
   return List/Cons(h >> 8, List/Cons(h & 0xFF, List/Cons(l >> 8, List/Cons(l & 0xFF, rest))))
 
-# Aplica una función currificada a cada elemento de la lista, en orden.
 def Sha256/apply(f, xs):
   match xs:
     case List/Nil:
@@ -44,7 +33,6 @@ def Sha256/apply(f, xs):
     case List/Cons:
       return Sha256/apply(f(xs.head), xs.tail)
 
-# Convierte un bloque de 64 bytes en 32 mitades de 16 bits [hi, lo, ...].
 def Sha256/block_words(xs: List(u24)) -> List(u24):
   match xs:
     case List/Nil:
@@ -56,8 +44,6 @@ def Sha256/block_words(xs: List(u24)) -> List(u24):
         case List/Cons:
           return List/Cons((xs.head << 8) | t.head, Sha256/block_words(t.tail))
 
-# Genera `n` palabras más del "message schedule" a partir de una ventana
-# de 16 palabras (w0 es la más antigua). Devuelve una lista plana [hi, lo, ...].
 def Sha256/schedule(n, w0h, w0l, w1h, w1l, w2h, w2l, w3h, w3l, w4h, w4l, w5h, w5l, w6h, w6l, w7h, w7l, w8h, w8l, w9h, w9l, w10h, w10l, w11h, w11l, w12h, w12l, w13h, w13l, w14h, w14l, w15h, w15l):
   if n == 0:
     return []
@@ -71,7 +57,6 @@ def Sha256/schedule(n, w0h, w0l, w1h, w1l, w2h, w2l, w3h, w3l, w4h, w4l, w5h, w5
     nl = nl & 0xFFFF
     return List/Cons(nh, List/Cons(nl, Sha256/schedule(n - 1, w1h, w1l, w2h, w2l, w3h, w3l, w4h, w4l, w5h, w5l, w6h, w6l, w7h, w7l, w8h, w8l, w9h, w9l, w10h, w10l, w11h, w11l, w12h, w12l, w13h, w13l, w14h, w14l, w15h, w15l, nh, nl)))
 
-# 64 rondas. `ks` y `ws` son listas planas [hi, lo, hi, lo, ...].
 def Sha256/rounds(ah, al, bh, bl, ch, cl, dh, dl, eh, el, fh, fl, gh, gl, hh, hl, ks, ws):
   match ks:
     case List/Nil:
@@ -132,7 +117,6 @@ def Sha256/compress(st, block: List(u24)):
   hsh = (hh + h2h + (hsl >> 16)) & 0xFFFF
   return (ash, asl & 0xFFFF, bsh, bsl & 0xFFFF, csh, csl & 0xFFFF, dsh, dsl & 0xFFFF, esh, esl & 0xFFFF, fsh, fsl & 0xFFFF, gsh, gsl & 0xFFFF, hsh, hsl & 0xFFFF)
 
-# Separa los primeros 64 bytes: (bloque, resto, cantidad_tomada).
 def Sha256/split64(xs: List(u24), n: u24) -> (List(u24), List(u24), u24):
   if n == 64:
     return ([], xs, 64)
@@ -144,8 +128,6 @@ def Sha256/split64(xs: List(u24), n: u24) -> (List(u24), List(u24), u24):
         (blk, rest, cnt) = Sha256/split64(xs.tail, n + 1)
         return (List/Cons(xs.head, blk), rest, cnt)
 
-# Relleno final: mensaje restante (< 64 bytes) + 0x80 + ceros + longitud en bits
-# (la longitud total está limitada a 2^24 bytes por el tipo u24).
 def Sha256/padding(tail: List(u24), tail_len: u24, total: u24) -> List(u24):
   if tail_len < 56:
     zeros = 55 - tail_len
@@ -154,22 +136,28 @@ def Sha256/padding(tail: List(u24), tail_len: u24, total: u24) -> List(u24):
   len_bytes = [0, 0, 0, 0, (total >> 21) & 0xFF, (total >> 13) & 0xFF, (total >> 5) & 0xFF, (total << 3) & 0xFF]
   return Bytes/concat(tail, List/Cons(0x80, Bytes/concat(Bytes/repeat(0, zeros), len_bytes)))
 
+def Sha256/ready(st) -> u24:
+  (ah, *) = st
+  return ah >> 16
+
 def Sha256/process(st, xs: List(u24), total: u24):
-  (blk, rest, cnt) = Sha256/split64(xs, 0)
-  if cnt == 64:
-    return Sha256/process(Sha256/compress(st, blk), rest, total + 64)
-  else:
-    padded = Sha256/padding(blk, cnt, total + cnt)
-    (b1, b2, *) = Sha256/split64(padded, 0)
-    if cnt < 56:
-      return Sha256/compress(st, b1)
+  if Sha256/ready(st) == 0:
+    (blk, rest, cnt) = Sha256/split64(xs, 0)
+    if cnt == 64:
+      return Sha256/process(Sha256/compress(st, blk), rest, total + 64)
     else:
-      return Sha256/compress(Sha256/compress(st, b1), b2)
+      padded = Sha256/padding(blk, cnt, total + cnt)
+      (b1, b2, *) = Sha256/split64(padded, 0)
+      if cnt < 56:
+        return Sha256/compress(st, b1)
+      else:
+        return Sha256/compress(Sha256/compress(st, b1), b2)
+  else:
+    return st
 
 def Sha256/state_bytes(st) -> List(u24):
   (ah, al, bh, bl, ch, cl, dh, dl, eh, el, fh, fl, gh, gl, hh, hl) = st
   return W32/to_bytes(ah, al, W32/to_bytes(bh, bl, W32/to_bytes(ch, cl, W32/to_bytes(dh, dl, W32/to_bytes(eh, el, W32/to_bytes(fh, fl, W32/to_bytes(gh, gl, W32/to_bytes(hh, hl, []))))))))
 
-# Hash SHA-256 de una secuencia de bytes; retorna 32 bytes.
 def Sha256/digest(xs: List(u24)) -> List(u24):
   return Sha256/state_bytes(Sha256/process(Sha256/H0, xs, 0))
